@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Good Studios</title>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background:
+                radial-gradient(circle at top, #202632 0%, #101319 42%, #090b0f 100%);
+            color: white;
+            min-height: 100vh;
+        }
+
+        header {
+            width: 100%;
+            padding: 22px 8%;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            background: rgba(10, 12, 17, 0.75);
+            backdrop-filter: blur(12px);
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+
+        .logo span {
+            color: #8fa8ff;
+        }
+
+        nav a {
+            color: #cfd5df;
+            text-decoration: none;
+            margin-left: 25px;
+            font-size: 15px;
+            transition: 0.2s;
+        }
+
+        nav a:hover {
+            color: white;
+        }
+
+        .hero {
+            min-height: 72vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .hero-content {
+            max-width: 850px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 8px 15px;
+            border: 1px solid rgba(143, 168, 255, 0.35);
+            background: rgba(143, 168, 255, 0.08);
+            border-radius: 999px;
+            color: #bdcaff;
+            font-size: 14px;
+            margin-bottom: 25px;
+        }
+
+        h1 {
+            font-size: clamp(44px, 8vw, 82px);
+            font-weight: 900;
+            line-height: 1;
+            margin-bottom: 25px;
+        }
+
+        h1 span {
+            background: linear-gradient(
+                90deg,
+                #ffffff,
+                #9fb3ff
+            );
+            -webkit-background-clip: text;
+            color: transparent;
+        }
+
+        .hero p {
+            font-size: 19px;
+            color: #aeb5c1;
+            line-height: 1.7;
+            max-width: 700px;
+            margin: auto;
+        }
+
+        .buttons {
+            margin-top: 38px;
+            display: flex;
+            justify-content: center;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+
+        .button {
+            padding: 14px 24px;
+            border-radius: 12px;
+            text-decoration: none;
+            font-weight: 700;
+            transition: 0.2s;
+        }
+
+        .button-primary {
+            background: #7389ff;
+            color: white;
+        }
+
+        .button-primary:hover {
+            transform: translateY(-2px);
+            background: #8498ff;
+        }
+
+        .button-secondary {
+            background: rgba(255,255,255,0.06);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .button-secondary:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .cards {
+            width: min(1100px, 90%);
+            margin: 0 auto 80px;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+
+        .card {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 18px;
+            padding: 28px;
+        }
+
+        .card-icon {
+            font-size: 28px;
+            margin-bottom: 18px;
+        }
+
+        .card h2 {
+            font-size: 20px;
+            margin-bottom: 12px;
+        }
+
+        .card p {
+            color: #9da5b2;
+            line-height: 1.6;
+            font-size: 15px;
+        }
+
+        footer {
+            border-top: 1px solid rgba(255,255,255,0.08);
+            padding: 30px 20px;
+            text-align: center;
+            color: #777f8d;
+            font-size: 14px;
+        }
+
+        footer a {
+            color: #9fb3ff;
+            text-decoration: none;
+            margin: 0 8px;
+        }
+
+        @media (max-width: 800px) {
+            header {
+                padding: 20px;
+            }
+
+            nav {
+                display: none;
+            }
+
+            .cards {
+                grid-template-columns: 1fr;
+            }
+
+            .hero p {
+                font-size: 16px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <div class="logo">
+        Good<span>Studios</span>
+    </div>
+
+    <nav>
+        <a href="/">Início</a>
+        <a href="terms.html">Termos</a>
+        <a href="privacy.html">Privacidade</a>
+    </nav>
+</header>
+
+<section class="hero">
+
+    <div class="hero-content">
+
+        <div class="badge">
+            Good Studios • Discord
+        </div>
+
+        <h1>
+            <span>Good Studios</span>
+        </h1>
+
+        <p>
+            Desenvolvimento de projetos, experiências e ferramentas para
+            comunidades. Esta página também contém os documentos oficiais
+            relacionados ao nosso bot do Discord.
+        </p>
+
+        <div class="buttons">
+
+            <a
+                href="terms.html"
+                class="button button-primary"
+            >
+                Termos de Serviço
+            </a>
+
+            <a
+                href="privacy.html"
+                class="button button-secondary"
+            >
+                Política de Privacidade
+            </a>
+
+        </div>
+
+    </div>
+
+</section>
+
+<section class="cards">
+
+    <div class="card">
+        <div class="card-icon">🛡️</div>
+
+        <h2>Moderação</h2>
+
+        <p>
+            Ferramentas para ajudar equipes a administrar,
+            organizar e proteger suas comunidades.
+        </p>
+    </div>
+
+    <div class="card">
+        <div class="card-icon">🎫</div>
+
+        <h2>Atendimento</h2>
+
+        <p>
+            Sistema de tickets, sugestões e recursos
+            para facilitar o atendimento de membros.
+        </p>
+    </div>
+
+    <div class="card">
+        <div class="card-icon">⚙️</div>
+
+        <h2>Automação</h2>
+
+        <p>
+            Logs, cargos, boas-vindas e outras
+            ferramentas automatizadas para servidores.
+        </p>
+    </div>
+
+</section>
+
+<footer>
+
+    <p>
+        © 2026 Good Studios. Todos os direitos reservados.
+    </p>
+
+    <br>
+
+    <a href="terms.html">
+        Termos de Serviço
+    </a>
+
+    <a href="privacy.html">
+        Política de Privacidade
+    </a>
+
+</footer>
+
+</body>
+
+</html>
