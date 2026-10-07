@@ -1,0 +1,28 @@
+{
+    "calculadora": {
+        "canalId": "1556393462184673290",
+        "viaPlus": 42,
+        "viaGrupo": null,
+        "semTaxa": 39,
+        "taxado": 39
+    },
+    "estoque": {
+        "canalId": "1556393566790615090",
+        "canalCompraId": "1556393427644448920",
+        "precoK": 39,
+        "status": "OFF",
+        "quantidade": 0
+    },
+    "vendas": {
+        "canalId": "1556393773599293511"
+    },
+    "cargos": {
+        "primeiraCompra": "1556396760065245375",
+        "cliente100": "1556396759226253424",
+        "cliente300": "1556396758257631393",
+        "cliente500": "1556397512510672906",
+        "cliente1000": "1556397513546932356",
+        "cliente5000": "1556397512057823282",
+        "cliente10000": "1556397511453835344"
+    }
+}
