@@ -1,12 +1,13 @@
+
+'use strict';
+
 const fs = require('fs');
 const path = require('path');
+
 const {
     createCanvas,
-    loadImage,
-    GlobalFonts
+    loadImage
 } = require('@napi-rs/canvas');
-
-const { AttachmentBuilder } = require('discord.js');
 
 const {
     calcularPreco,
@@ -17,336 +18,506 @@ const {
     formatarRobux
 } = require('../utils/calculator');
 
-
 // ==========================================
-// CAMINHOS
-// ==========================================
-
-const ASSETS_DIR = path.join(__dirname, '..', 'assets');
-const CALCULADORA_BASE = path.join(ASSETS_DIR, 'calculadora-base.png');
-
-
-// ==========================================
-// FONTES
+// INOVARESALE BOT 2.0
+// CALCULADORA COM TEXTO EM PIXELS
+// NAO DEPENDE DE FONTES DA RAILWAY
 // ==========================================
 
-function registrarFontes() {
-    const fontesPossiveis = [
-        path.join(process.cwd(), 'assets', 'Montserrat-Bold.ttf'),
-        path.join(process.cwd(), 'assets', 'Montserrat-Regular.ttf'),
-        path.join(process.cwd(), 'assets', 'Poppins-Bold.ttf'),
-        path.join(process.cwd(), 'assets', 'Poppins-Regular.ttf')
-    ];
+const LETRAS = {
+    A: ['01110','10001','10001','11111','10001','10001','10001'],
+    B: ['11110','10001','10001','11110','10001','10001','11110'],
+    C: ['01111','10000','10000','10000','10000','10000','01111'],
+    D: ['11110','10001','10001','10001','10001','10001','11110'],
+    E: ['11111','10000','10000','11110','10000','10000','11111'],
+    F: ['11111','10000','10000','11110','10000','10000','10000'],
+    G: ['01111','10000','10000','10111','10001','10001','01111'],
+    H: ['10001','10001','10001','11111','10001','10001','10001'],
+    I: ['11111','00100','00100','00100','00100','00100','11111'],
+    J: ['00111','00010','00010','00010','10010','10010','01100'],
+    K: ['10001','10010','10100','11000','10100','10010','10001'],
+    L: ['10000','10000','10000','10000','10000','10000','11111'],
+    M: ['10001','11011','10101','10101','10001','10001','10001'],
+    N: ['10001','11001','10101','10011','10001','10001','10001'],
+    O: ['01110','10001','10001','10001','10001','10001','01110'],
+    P: ['11110','10001','10001','11110','10000','10000','10000'],
+    Q: ['01110','10001','10001','10001','10101','10010','01101'],
+    R: ['11110','10001','10001','11110','10100','10010','10001'],
+    S: ['01111','10000','10000','01110','00001','00001','11110'],
+    T: ['11111','00100','00100','00100','00100','00100','00100'],
+    U: ['10001','10001','10001','10001','10001','10001','01110'],
+    V: ['10001','10001','10001','10001','10001','01010','00100'],
+    W: ['10001','10001','10001','10101','10101','10101','01010'],
+    X: ['10001','10001','01010','00100','01010','10001','10001'],
+    Y: ['10001','10001','01010','00100','00100','00100','00100'],
+    Z: ['11111','00001','00010','00100','01000','10000','11111'],
 
-    for (const fonte of fontesPossiveis) {
-        if (fs.existsSync(fonte)) {
-            try {
-                GlobalFonts.registerFromPath(fonte, path.basename(fonte, '.ttf'));
-            } catch (_) {}
+    '0': ['01110','10011','10101','10101','11001','10001','01110'],
+    '1': ['00100','01100','00100','00100','00100','00100','01110'],
+    '2': ['01110','10001','00001','00010','00100','01000','11111'],
+    '3': ['11110','00001','00001','01110','00001','00001','11110'],
+    '4': ['00010','00110','01010','10010','11111','00010','00010'],
+    '5': ['11111','10000','10000','11110','00001','00001','11110'],
+    '6': ['01110','10000','10000','11110','10001','10001','01110'],
+    '7': ['11111','00001','00010','00100','01000','01000','01000'],
+    '8': ['01110','10001','10001','01110','10001','10001','01110'],
+    '9': ['01110','10001','10001','01111','00001','00001','01110'],
+
+    '.': ['00000','00000','00000','00000','00000','01100','01100'],
+    ',': ['00000','00000','00000','00000','01100','01100','00100'],
+    ':': ['00000','01100','01100','00000','01100','01100','00000'],
+    '$': ['00100','01111','10100','01110','00101','11110','00100'],
+    '/': ['00001','00001','00010','00100','01000','10000','10000'],
+    '-': ['00000','00000','00000','11111','00000','00000','00000'],
+    '+': ['00000','00100','00100','11111','00100','00100','00000'],
+    '%': ['11001','11001','00010','00100','01000','10011','10011'],
+    '(': ['00010','00100','01000','01000','01000','00100','00010'],
+    ')': ['01000','00100','00010','00010','00010','00100','01000'],
+    ' ': ['00000','00000','00000','00000','00000','00000','00000']
+};
+
+// ==========================================
+// TEXTO SEM USAR FONTES
+// ==========================================
+
+function normalizar(texto) {
+    return String(texto)
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toUpperCase();
+}
+
+function desenharTexto(
+    ctx,
+    conteudo,
+    x,
+    y,
+    tamanho,
+    cor,
+    larguraMax = Infinity,
+    alinhar = 'esquerda'
+) {
+    const letras = normalizar(conteudo);
+
+    let escala = tamanho;
+
+    while (
+        letras.length * 6 * escala > larguraMax &&
+        escala > 2
+    ) {
+        escala--;
+    }
+
+    const largura = letras.length * 6 * escala;
+
+    const inicio =
+        alinhar === 'direita'
+            ? x - largura
+            : alinhar === 'centro'
+                ? x - largura / 2
+                : x;
+
+    ctx.fillStyle = cor;
+
+    for (let i = 0; i < letras.length; i++) {
+        const linhas =
+            LETRAS[letras[i]] || LETRAS[' '];
+
+        for (let linha = 0; linha < 7; linha++) {
+            for (let coluna = 0; coluna < 5; coluna++) {
+                if (linhas[linha][coluna] === '1') {
+                    ctx.fillRect(
+                        inicio + (i * 6 + coluna) * escala,
+                        y + linha * escala,
+                        escala,
+                        escala
+                    );
+                }
+            }
         }
     }
 }
 
-registrarFontes();
-
-
 // ==========================================
-// HELPERS
+// VERIFICAR PRECO K E BLOQUEIOS
 // ==========================================
 
-function metodoAtivo(valor) {
-    return (
-        valor !== null &&
-        valor !== undefined &&
-        valor !== false &&
-        Number(valor) > 0
+function obterPrecoK(config, chave) {
+    const bruto = config?.calculadora?.[chave];
+
+    if (
+        bruto === null ||
+        bruto === undefined ||
+        bruto === '' ||
+        bruto === false
+    ) {
+        return null;
+    }
+
+    const preco = Number(bruto);
+    const bloqueios = config?.tickets?.bloqueados || {};
+
+    if (
+        chave === 'viaGrupo' &&
+        bloqueios.viaGrupo !== false
+    ) {
+        return null;
+    }
+
+    if (
+        chave !== 'viaGrupo' &&
+        bloqueios[chave] === true
+    ) {
+        return null;
+    }
+
+    if (!Number.isFinite(preco) || preco <= 0) {
+        return null;
+    }
+
+    return preco;
+}
+
+// ==========================================
+// CALCULAR AS QUATRO MODALIDADES
+// ==========================================
+
+function criarLinhas(tipo, valor, config) {
+    const metodos = [
+        ['viaPlus', 'VIA PLUS'],
+        ['semTaxa', 'ROBUX SEM TAXA'],
+        ['taxado', 'ROBUX TAXADO'],
+        ['viaGrupo', 'VIA GRUPO']
+    ];
+
+    return metodos.map(([chave, nome]) => {
+        const k = obterPrecoK(config, chave);
+
+        if (!k) {
+            return {
+                nome,
+                k: 'DESATIVADO',
+                principal: 'INDISPONIVEL',
+                detalhe: 'CONFIGURE NO /SETUP'
+            };
+        }
+
+        let principal;
+        let detalhe;
+
+        if (tipo === 'robux') {
+            if (chave === 'semTaxa') {
+                const r = calcularSemTaxa(valor, k);
+
+                principal = formatarDinheiro(r.preco);
+                detalhe =
+                    `RECEBE ${formatarRobux(r.robuxRecebido)} ROBUX`;
+
+            } else if (chave === 'taxado') {
+                const r = calcularTaxado(valor, k);
+
+                principal = formatarDinheiro(r.preco);
+                detalhe =
+                    `GAMEPASS ${formatarRobux(r.robuxGamepass)} ROBUX`;
+
+            } else {
+                principal = formatarDinheiro(
+                    calcularPreco(valor, k)
+                );
+
+                detalhe =
+                    `${formatarRobux(valor)} ROBUX`;
+            }
+
+        } else {
+            if (
+                chave === 'semTaxa' ||
+                chave === 'taxado'
+            ) {
+                const r = calcularPorReais(valor, k);
+
+                principal =
+                    `${formatarRobux(r.robuxRecebido)} ROBUX`;
+
+                detalhe =
+                    `GAMEPASS ${formatarRobux(r.robuxGamepass)}`;
+
+            } else {
+                const quantidade = Math.floor(
+                    valor / k * 1000
+                );
+
+                principal =
+                    `${formatarRobux(quantidade)} ROBUX`;
+
+                detalhe =
+                    `POR ${formatarDinheiro(valor)}`;
+            }
+        }
+
+        return {
+            nome,
+            k: `K ${k.toLocaleString('pt-BR')}`,
+            principal,
+            detalhe
+        };
+    });
+}
+
+// ==========================================
+// GERAR IMAGEM FINAL
+// ==========================================
+
+async function gerarImagem(tipo, valor, config = {}) {
+    const quantidade = Number(valor);
+
+    if (
+        !Number.isFinite(quantidade) ||
+        quantidade <= 0 ||
+        (
+            tipo === 'robux' &&
+            !Number.isSafeInteger(quantidade)
+        )
+    ) {
+        throw new Error(
+            'Valor invalido para a calculadora.'
+        );
+    }
+
+    const caminho = path.join(
+        __dirname,
+        '..',
+        'assets',
+        'calculadora-base.png'
+    );
+
+    if (!fs.existsSync(caminho)) {
+        throw new Error(
+            'Arquivo assets/calculadora-base.png nao encontrado.'
+        );
+    }
+
+    const fundo = await loadImage(caminho);
+
+    const canvas = createCanvas(
+        fundo.width,
+        fundo.height
+    );
+
+    const ctx = canvas.getContext('2d');
+
+    // Desenhar a imagem original.
+    ctx.drawImage(
+        fundo,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    // Ajustar coordenadas para o modelo.
+    ctx.save();
+
+    ctx.scale(
+        canvas.width / 1672,
+        canvas.height / 941
+    );
+
+    const linhas = criarLinhas(
+        tipo,
+        quantidade,
+        config
+    );
+
+    // ======================================
+    // QUATRO LINHAS DA CALCULADORA
+    // ======================================
+
+    for (let i = 0; i < linhas.length; i++) {
+        const linha = linhas[i];
+
+        const y = 355 + i * 94;
+
+        // Fundo escuro da modalidade.
+        ctx.fillStyle = 'rgba(6, 7, 10, 0.90)';
+        ctx.fillRect(
+            520,
+            y,
+            1032,
+            87
+        );
+
+        // Moldura prateada.
+        ctx.strokeStyle =
+            'rgba(213, 213, 230, 0.44)';
+
+        ctx.lineWidth = 2;
+
+        ctx.strokeRect(
+            520,
+            y,
+            1032,
+            87
+        );
+
+        // Detalhe lateral.
+        ctx.fillStyle = '#e7e7ef';
+
+        ctx.fillRect(
+            532,
+            y + 12,
+            4,
+            62
+        );
+
+        // Nome da modalidade.
+        desenharTexto(
+            ctx,
+            linha.nome,
+            554,
+            y + 12,
+            4,
+            '#ffffff',
+            500
+        );
+
+        // Preco K.
+        desenharTexto(
+            ctx,
+            linha.k,
+            554,
+            y + 56,
+            3,
+            '#b6b6c7',
+            240
+        );
+
+        // Preco ou quantidade principal.
+        desenharTexto(
+            ctx,
+            linha.principal,
+            1534,
+            y + 12,
+            5,
+            '#f5f5ff',
+            470,
+            'direita'
+        );
+
+        // Detalhe da entrega.
+        desenharTexto(
+            ctx,
+            linha.detalhe,
+            1534,
+            y + 58,
+            3,
+            '#d1d1df',
+            725,
+            'direita'
+        );
+    }
+
+    // ======================================
+    // QUANTIDADE ESCOLHIDA
+    // ======================================
+
+    ctx.fillStyle =
+        'rgba(5, 5, 7, 0.95)';
+
+    ctx.fillRect(
+        82,
+        705,
+        374,
+        88
+    );
+
+    ctx.strokeStyle =
+        'rgba(190, 190, 200, 0.6)';
+
+    ctx.lineWidth = 2;
+
+    ctx.strokeRect(
+        82,
+        705,
+        374,
+        88
+    );
+
+    const selecionado =
+        tipo === 'reais'
+            ? formatarDinheiro(quantidade)
+            : `${formatarRobux(quantidade)} ROBUX`;
+
+    desenharTexto(
+        ctx,
+        selecionado,
+        269,
+        724,
+        6,
+        '#ffffff',
+        344,
+        'centro'
+    );
+
+    ctx.restore();
+
+    // IMPORTANTE:
+    // Retorna Buffer, compatível com
+    // events/messageCreate.js.
+    const png = Buffer.from(
+        await canvas.encode('png')
+    );
+
+    if (png.length < 1000) {
+        throw new Error(
+            'Falha ao codificar PNG da calculadora.'
+        );
+    }
+
+    return png;
+}
+
+// ==========================================
+// FUNCOES UTILIZADAS PELO MESSAGECREATE
+// ==========================================
+
+async function gerarImagemPorRobux(
+    robux,
+    config
+) {
+    return gerarImagem(
+        'robux',
+        robux,
+        config
     );
 }
 
-function textoCentralizado(ctx, texto, x, y, largura) {
-    const medidas = ctx.measureText(texto);
-    const posX = x + ((largura - medidas.width) / 2);
-    ctx.fillText(texto, posX, y);
+async function gerarImagemPorReais(
+    reais,
+    config
+) {
+    return gerarImagem(
+        'reais',
+        reais,
+        config
+    );
 }
-
-function textoLimitado(ctx, texto, x, y, larguraMax) {
-    let finalTexto = String(texto);
-
-    while (ctx.measureText(finalTexto).width > larguraMax && finalTexto.length > 0) {
-        finalTexto = finalTexto.slice(0, -1);
-    }
-
-    if (finalTexto !== texto) {
-        finalTexto = finalTexto.slice(0, -3) + '...';
-    }
-
-    ctx.fillText(finalTexto, x, y);
-}
-
-function criarLinhasPorRobux(robux, config) {
-    const calc = config.calculadora || {};
-    const linhas = [];
-
-    if (metodoAtivo(calc.viaPlus)) {
-        const preco = calcularPreco(robux, calc.viaPlus);
-
-        linhas.push({
-            titulo: `Via Plus • K${calc.viaPlus}`,
-            valor: formatarDinheiro(preco),
-            extra: `${formatarRobux(robux)} Robux`
-        });
-    }
-
-    if (metodoAtivo(calc.viaGrupo)) {
-        const preco = calcularPreco(robux, calc.viaGrupo);
-
-        linhas.push({
-            titulo: `Via Grupo • K${calc.viaGrupo}`,
-            valor: formatarDinheiro(preco),
-            extra: `${formatarRobux(robux)} Robux`
-        });
-    }
-
-    if (metodoAtivo(calc.semTaxa)) {
-        const resultado = calcularSemTaxa(robux, calc.semTaxa);
-
-        linhas.push({
-            titulo: `Robux Sem Taxa • K${calc.semTaxa}`,
-            valor: formatarDinheiro(resultado.preco),
-            extra: `Recebe ${formatarRobux(resultado.robuxRecebido)} • Gamepass ${formatarRobux(resultado.robuxGamepass)}`
-        });
-    }
-
-    if (metodoAtivo(calc.taxado)) {
-        const resultado = calcularTaxado(robux, calc.taxado);
-
-        linhas.push({
-            titulo: `Robux Taxado • K${calc.taxado}`,
-            valor: formatarDinheiro(resultado.preco),
-            extra: `Recebe ${formatarRobux(resultado.robuxRecebido)} • Gamepass ${formatarRobux(resultado.robuxGamepass)}`
-        });
-    }
-
-    return linhas.slice(0, 4);
-}
-
-function criarLinhasPorReais(valorReais, config) {
-    const calc = config.calculadora || {};
-    const linhas = [];
-
-    if (metodoAtivo(calc.viaPlus)) {
-        const robux = Math.floor((valorReais / Number(calc.viaPlus)) * 1000);
-
-        linhas.push({
-            titulo: `Via Plus • K${calc.viaPlus}`,
-            valor: `${formatarRobux(robux)} Robux`,
-            extra: `Com ${formatarDinheiro(valorReais)}`
-        });
-    }
-
-    if (metodoAtivo(calc.viaGrupo)) {
-        const robux = Math.floor((valorReais / Number(calc.viaGrupo)) * 1000);
-
-        linhas.push({
-            titulo: `Via Grupo • K${calc.viaGrupo}`,
-            valor: `${formatarRobux(robux)} Robux`,
-            extra: `Com ${formatarDinheiro(valorReais)}`
-        });
-    }
-
-    if (metodoAtivo(calc.semTaxa)) {
-        const resultado = calcularPorReais(valorReais, calc.semTaxa);
-
-        linhas.push({
-            titulo: `Robux Sem Taxa • K${calc.semTaxa}`,
-            valor: `${formatarRobux(resultado.robuxRecebido)} Robux`,
-            extra: `Gamepass ${formatarRobux(resultado.robuxGamepass)}`
-        });
-    }
-
-    if (metodoAtivo(calc.taxado)) {
-        const resultado = calcularPorReais(valorReais, calc.taxado);
-
-        linhas.push({
-            titulo: `Robux Taxado • K${calc.taxado}`,
-            valor: `${formatarRobux(resultado.robuxRecebido)} Robux`,
-            extra: `Gamepass ${formatarRobux(resultado.robuxGamepass)}`
-        });
-    }
-
-    return linhas.slice(0, 4);
-}
-
-
-// ==========================================
-// GERAR IMAGEM PRINCIPAL
-// ==========================================
 
 async function gerarImagemCalculadora({
     tipo,
     valor,
     config
 }) {
-    if (!fs.existsSync(CALCULADORA_BASE)) {
-        throw new Error('[InovareSale] calculadora-base.png não encontrado em /assets');
-    }
-
-    const base = await loadImage(CALCULADORA_BASE);
-
-    const canvas = createCanvas(base.width, base.height);
-    const ctx = canvas.getContext('2d');
-
-    // ======================================
-    // PASSO 1: DESENHAR A BASE PRIMEIRO
-    // ======================================
-    // Esse é o ponto principal da correção.
-    ctx.drawImage(base, 0, 0, base.width, base.height);
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    // ======================================
-    // ESTILOS
-    // ======================================
-    const corPrincipal = '#ffffff';
-    const corSecundaria = '#cfcfe6';
-    const corDestaque = '#ffffff';
-
-    // Caixa esquerda (robux selecionado)
-    ctx.fillStyle = corPrincipal;
-    ctx.font = `bold ${Math.floor(w * 0.030)}px Arial`;
-
-    const textoSelecionado =
-        tipo === 'reais'
-            ? formatarDinheiro(valor)
-            : `${formatarRobux(valor)}`;
-
-    textoCentralizado(
-        ctx,
-        textoSelecionado,
-        w * 0.055,
-        h * 0.835,
-        w * 0.205
-    );
-
-    // Subtexto da esquerda
-    ctx.fillStyle = corSecundaria;
-    ctx.font = `${Math.floor(w * 0.013)}px Arial`;
-
-    const subtituloSelecionado =
-        tipo === 'reais'
-            ? 'VALOR INFORMADO'
-            : 'ROBUX INFORMADO';
-
-    textoCentralizado(
-        ctx,
-        subtituloSelecionado,
-        w * 0.055,
-        h * 0.885,
-        w * 0.205
-    );
-
-    // ======================================
-    // LINHAS PRINCIPAIS
-    // ======================================
-    const linhas =
-        tipo === 'reais'
-            ? criarLinhasPorReais(valor, config)
-            : criarLinhasPorRobux(valor, config);
-
-    const posicoesY = [
-        h * 0.405,
-        h * 0.500,
-        h * 0.595,
-        h * 0.690
-    ];
-
-    for (let i = 0; i < linhas.length; i++) {
-        const linha = linhas[i];
-        const yBase = posicoesY[i];
-
-        // título da modalidade
-        ctx.fillStyle = corPrincipal;
-        ctx.font = `bold ${Math.floor(w * 0.020)}px Arial`;
-        textoLimitado(
-            ctx,
-            linha.titulo,
-            w * 0.375,
-            yBase,
-            w * 0.40
-        );
-
-        // valor principal
-        ctx.fillStyle = corDestaque;
-        ctx.font = `bold ${Math.floor(w * 0.026)}px Arial`;
-        textoLimitado(
-            ctx,
-            linha.valor,
-            w * 0.375,
-            yBase + (h * 0.040),
-            w * 0.26
-        );
-
-        // detalhe extra
-        ctx.fillStyle = corSecundaria;
-        ctx.font = `${Math.floor(w * 0.014)}px Arial`;
-        textoLimitado(
-            ctx,
-            linha.extra,
-            w * 0.375,
-            yBase + (h * 0.073),
-            w * 0.41
-        );
-    }
-
-    // Se tiver menos de 4 linhas, preenche aviso
-    if (linhas.length === 0) {
-        ctx.fillStyle = '#ffffff';
-        ctx.font = `bold ${Math.floor(w * 0.022)}px Arial`;
-        textoLimitado(
-            ctx,
-            'Nenhuma modalidade ativa no /setup',
-            w * 0.375,
-            h * 0.48,
-            w * 0.40
-        );
-    }
-
-    const buffer = await canvas.encode('png');
-
-    return new AttachmentBuilder(buffer, {
-        name: 'calculadora.png'
-    });
-}
-
-
-// ==========================================
-// WRAPPERS
-// ==========================================
-
-async function gerarImagemPorRobux(robux, config) {
-    return gerarImagemCalculadora({
-        tipo: 'robux',
-        valor: robux,
+    return gerarImagem(
+        tipo,
+        valor,
         config
-    });
+    );
 }
-
-async function gerarImagemPorReais(valorReais, config) {
-    return gerarImagemCalculadora({
-        tipo: 'reais',
-        valor: valorReais,
-        config
-    });
-}
-
-
-// ==========================================
-// EXPORTS
-// ==========================================
 
 module.exports = {
-    gerarImagemCalculadora,
     gerarImagemPorRobux,
-    gerarImagemPorReais
+    gerarImagemPorReais,
+    gerarImagemCalculadora
 };
+    
