@@ -20,36 +20,32 @@ const {
 
 // ==========================================
 // INOVARESALE BOT 2.0
-// CALCULADORA AUTOMATICA POR IMAGEM
-// ==========================================
-// Exemplos aceitos no canal configurado:
-//   5000       -> 5.000 Robux
-//   5.000      -> 5.000 Robux
-//   5k         -> 5.000 Robux
-//   5,5k       -> 5.500 Robux
-//   5000 robux -> 5.000 Robux
-//   R$ 100     -> orcamento de R$ 100,00
-//   R$ 39,50   -> orcamento de R$ 39,50
-//   100 reais  -> orcamento de R$ 100,00
+// CALCULADORA AUTOMATICA
 // ==========================================
 
 const COOLDOWN_MS = 3000;
+
 const usuariosEmProcessamento = new Set();
 const ultimaConsulta = new Map();
+
 let ultimaLimpeza = 0;
 
 // ==========================================
-// RECONHECER SE O TEXTO E UM CALCULO
+// INTERPRETAR MENSAGENS
 // ==========================================
 
 function interpretarMensagemCalculadora(conteudo) {
     const texto = String(conteudo ?? '').trim();
 
-    if (!texto || texto.length > 80 || texto.includes('\n')) {
+    if (
+        !texto ||
+        texto.length > 80 ||
+        texto.includes('\n')
+    ) {
         return null;
     }
 
-    // Entradas com R$ ou palavras como "reais" sao orcamentos.
+    // Exemplos: R$ 100, R$ 39,50
     const comCifrao = texto.match(/^R\$\s*(.+)$/i);
 
     if (comCifrao) {
@@ -59,6 +55,7 @@ function interpretarMensagemCalculadora(conteudo) {
         };
     }
 
+    // Exemplos: 100 reais, 50 BRL
     const comReais = texto.match(
         /^(\d[\d.,\s]*)\s*(?:reais?|brl)$/i
     );
@@ -70,20 +67,25 @@ function interpretarMensagemCalculadora(conteudo) {
         };
     }
 
-    // Numero ou numero com K (com "robux" opcional).
+    // Exemplos: 100, 5000, 5k, 5,5k
     let quantidadeTexto = texto;
 
     if (/\s*robux$/i.test(quantidadeTexto)) {
-        quantidadeTexto = quantidadeTexto.replace(/\s*robux$/i, '').trim();
+        quantidadeTexto = quantidadeTexto
+            .replace(/\s*robux$/i, '')
+            .trim();
     }
 
     const formatoInteiro =
         /^(?:\d+|\d{1,3}(?:\.\d{3})+)$/;
 
-    const formatoK = /^\d+(?:[.,]\d{1,3})?\s*k$/i;
+    const formatoK =
+        /^\d+(?:[.,]\d{1,3})?\s*k$/i;
 
-    if (!formatoInteiro.test(quantidadeTexto) &&
-        !formatoK.test(quantidadeTexto)) {
+    if (
+        !formatoInteiro.test(quantidadeTexto) &&
+        !formatoK.test(quantidadeTexto)
+    ) {
         return null;
     }
 
@@ -96,7 +98,7 @@ function interpretarMensagemCalculadora(conteudo) {
 }
 
 // ==========================================
-// EVITAR VARIAS IMAGENS AO MESMO TEMPO
+// CONTROLE DE CONSULTAS
 // ==========================================
 
 function limparConsultasAntigas() {
@@ -136,7 +138,7 @@ function permitirConsulta(chave) {
 }
 
 // ==========================================
-// RESPONDER SEM MENCIONAR O USUARIO
+// RESPONDER MENSAGEM
 // ==========================================
 
 async function responderMensagem(mensagem, dados) {
@@ -150,22 +152,81 @@ async function responderMensagem(mensagem, dados) {
 }
 
 // ==========================================
-// GERAR E ENVIAR A IMAGEM
+// NORMALIZAR ARQUIVO GERADO
 // ==========================================
 
-async function processarCalculadora(mensagem, config, entrada) {
-    const imagem = entrada.tipo === 'robux'
-        ? await gerarImagemPorRobux(entrada.valor, config)
-        : await gerarImagemPorReais(entrada.valor, config);
+function prepararImagem(imagem) {
 
-    if (!imagem || imagem.length === 0) {
-        throw new Error('A imagem da calculadora ficou vazia.');
+    // CORRECAO PRINCIPAL:
+    // O imagemService novo ja retorna
+    // um AttachmentBuilder pronto.
+    //
+    // Nao podemos colocar AttachmentBuilder
+    // dentro de outro AttachmentBuilder.
+
+    if (imagem instanceof AttachmentBuilder) {
+        return imagem;
     }
 
-    const arquivo = new AttachmentBuilder(imagem, {
-        name: 'inovaresale-calculadora.png',
-        description: 'Tabela de precos da InovareSale'
-    });
+    // Compatibilidade com versoes antigas
+    // que retornavam um Buffer de imagem.
+
+    if (Buffer.isBuffer(imagem)) {
+        if (imagem.length === 0) {
+            throw new Error(
+                'A imagem gerada está vazia.'
+            );
+        }
+
+        return new AttachmentBuilder(imagem, {
+            name: 'inovaresale-calculadora.png'
+        });
+    }
+
+    if (imagem instanceof Uint8Array) {
+        if (imagem.byteLength === 0) {
+            throw new Error(
+                'A imagem gerada está vazia.'
+            );
+        }
+
+        return new AttachmentBuilder(
+            Buffer.from(imagem),
+            {
+                name: 'inovaresale-calculadora.png'
+            }
+        );
+    }
+
+    throw new Error(
+        'O serviço de imagens retornou um formato inválido.'
+    );
+}
+
+// ==========================================
+// GERAR E ENVIAR IMAGEM
+// ==========================================
+
+async function processarCalculadora(
+    mensagem,
+    config,
+    entrada
+) {
+    let imagem;
+
+    if (entrada.tipo === 'robux') {
+        imagem = await gerarImagemPorRobux(
+            entrada.valor,
+            config
+        );
+    } else {
+        imagem = await gerarImagemPorReais(
+            entrada.valor,
+            config
+        );
+    }
+
+    const arquivo = prepararImagem(imagem);
 
     await responderMensagem(mensagem, {
         files: [arquivo]
@@ -173,13 +234,14 @@ async function processarCalculadora(mensagem, config, entrada) {
 }
 
 // ==========================================
-// EVENTO DE MENSAGENS
+// EVENTO MESSAGE CREATE
 // ==========================================
 
 module.exports = {
     name: Events.MessageCreate,
 
     async execute(mensagem) {
+
         if (
             !mensagem?.guild ||
             !mensagem.author ||
@@ -195,49 +257,73 @@ module.exports = {
             config = getConfig();
         } catch (erro) {
             console.error(
-                '[InovareSale] Falha ao carregar configuracao da calculadora:',
+                '[InovareSale] Erro ao carregar configurações:',
                 erro
             );
             return;
         }
 
-        const canalCalculadora = config?.calculadora?.canalId;
+        const canalCalculadora =
+            config?.calculadora?.canalId;
 
-        // Nunca interferir em conversas de outros canais.
-        if (!canalCalculadora || mensagem.channelId !== canalCalculadora) {
+        // Só funciona no canal configurado.
+        if (
+            !canalCalculadora ||
+            mensagem.channelId !== canalCalculadora
+        ) {
             return;
         }
 
         let entrada;
 
         try {
-            entrada = interpretarMensagemCalculadora(mensagem.content);
+            entrada = interpretarMensagemCalculadora(
+                mensagem.content
+            );
         } catch (erro) {
             await responderMensagem(mensagem, {
-                content: `❌ ${erro.message}\n\n` +
-                    'Exemplos: `5000`, `5k`, `5,5k`, `R$ 100`.'
+                content:
+                    `Valor inválido: ${erro.message}\n\n` +
+                    'Exemplos: `100`, `5000`, `5k`, `R$ 100`.'
             }).catch(console.error);
+
             return;
         }
 
-        // Mensagens normais, links e comandos nao geram imagens.
+        // Ignora conversas normais.
         if (!entrada) {
             return;
         }
 
-        const chave = `${mensagem.guildId}:${mensagem.author.id}`;
+        const chave =
+            `${mensagem.guildId}:${mensagem.author.id}`;
 
         if (!permitirConsulta(chave)) {
             return;
         }
 
         try {
-            // Indica que o bot esta gerando a imagem.
-            if (typeof mensagem.channel.sendTyping === 'function') {
-                await mensagem.channel.sendTyping().catch(() => {});
+            // Mostra "digitando..." no Discord.
+            if (
+                typeof mensagem.channel.sendTyping ===
+                'function'
+            ) {
+                await mensagem.channel
+                    .sendTyping()
+                    .catch(() => {});
             }
 
-            await processarCalculadora(mensagem, config, entrada);
+            // Gera e envia a imagem.
+            await processarCalculadora(
+                mensagem,
+                config,
+                entrada
+            );
+
+            console.log(
+                `[InovareSale] Calculadora enviada: ` +
+                `${entrada.tipo} = ${entrada.valor}`
+            );
 
         } catch (erro) {
             console.error(
@@ -247,8 +333,8 @@ module.exports = {
 
             await responderMensagem(mensagem, {
                 content:
-                    '❌ Não consegui gerar a imagem agora. ' +
-                    'Avise a equipe se o problema continuar.'
+                    'Não consegui gerar a imagem agora. ' +
+                    'A equipe pode consultar o erro nos logs.'
             }).catch(console.error);
 
         } finally {
