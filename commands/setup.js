@@ -1,253 +1,62 @@
 
+'use strict';
+
 const {
     SlashCommandBuilder,
     PermissionFlagsBits,
-    EmbedBuilder,
-    ActionRowBuilder,
-    ButtonBuilder,
-    ButtonStyle,
-    AttachmentBuilder,
     MessageFlags,
     ChannelType
 } = require('discord.js');
 
-const fs = require('fs');
-const path = require('path');
+const { getConfig } = require('../utils/storage');
 
 const {
-    getConfig,
-    saveConfig
-} = require('../utils/storage');
+    criarPublicacaoSetup
+} = require('../panels/setupPanel');
 
 // ==========================================
-// IMAGENS DO PAINEL
+// INOVARESALE BOT 2.0
+// COMANDO /SETUP
 // ==========================================
 
-function caminhoImagem(nome) {
-    return path.join(
-        __dirname,
-        '..',
-        'assets',
-        nome
+// Verifica se uma mensagem é um painel
+// administrativo publicado pelo próprio bot.
+
+function ehPainelDoSetup(mensagem, botId) {
+    if (mensagem.author?.id !== botId) {
+        return false;
+    }
+
+    return (mensagem.components || []).some(linha =>
+        (linha.components || []).some(componente =>
+            typeof componente.customId === 'string' &&
+            componente.customId.startsWith('setup_')
+        )
     );
 }
 
-function imagemDisponivel(nome) {
-    const caminho = caminhoImagem(nome);
+// ==========================================
+// PROCURAR PAINEL ANTIGO
+// ==========================================
 
+async function localizarPainelAntigo(canal, botId) {
     try {
-        const tamanho = fs.statSync(caminho).size;
+        const mensagens = await canal.messages.fetch({
+            limit: 100
+        });
 
-        return (
-            tamanho > 0 &&
-            tamanho <= 8 * 1024 * 1024
-        );
-    } catch {
-        return false;
-    }
-}
+        return mensagens.find(mensagem =>
+            ehPainelDoSetup(mensagem, botId)
+        ) || null;
 
-function arquivosDoPainel() {
-    const arquivos = [];
-
-    for (const nome of ['banner.png', 'logo.png']) {
-        if (imagemDisponivel(nome)) {
-            arquivos.push(
-                new AttachmentBuilder(
-                    caminhoImagem(nome),
-                    { name: nome }
-                )
-            );
-        }
-    }
-
-    return arquivos;
-}
-
-// ==========================================
-// CRIAR PAINEL CENTRAL
-// ==========================================
-
-function criarPainelPrincipal(imagens = {}) {
-    const embed = new EmbedBuilder()
-        .setColor(0xC0C0C0)
-        .setTitle(
-            '⚙️ CENTRAL DE CONFIGURAÇÕES — INOVARESALE'
-        )
-        .setDescription(
-            'Bem-vindo ao painel administrativo da ' +
-            '**InovareSale Bot 2.0**.\n\n' +
-
-            'Gerencie todos os sistemas da loja ' +
-            'diretamente pelo Discord.\n\n' +
-
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-            '🧮 **CALCULADORA**\n' +
-            'Preços K, métodos de compra e canal ' +
-            'da calculadora.\n\n' +
-
-            '📦 **ESTOQUE**\n' +
-            'Canal de estoque, preço, publicações ' +
-            'e status da loja.\n\n' +
-
-            '💰 **VENDAS**\n' +
-            'Canal de vendas e registros ' +
-            'de compras concluídas.\n\n' +
-
-            '🏆 **CARGOS**\n' +
-            'Configuração dos cargos automáticos ' +
-            'dos clientes.\n\n' +
-
-            '🎫 **TICKETS**\n' +
-            'Equipe de atendimento, categorias ' +
-            'e permissões de compra.\n\n' +
-
-            '🔐 **BLOQUEIOS**\n' +
-            'Tranque ou destranque cada ' +
-            'modalidade de compra.\n\n' +
-
-            '🛒 **CENTRAL DE PEDIDOS**\n' +
-            'Configure e publique o painel ' +
-            'de compras da loja.\n\n' +
-
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-            '🛡️ **Acesso administrativo**\n' +
-            'Apenas administradores podem ' +
-            'alterar as configurações.'
-        )
-        .setFooter({
-            text:
-                'InovareSale • Painel Central 2.0'
-        })
-        .setTimestamp();
-
-    if (imagens.logo) {
-        embed.setThumbnail(imagens.logo);
-    }
-
-    if (imagens.banner) {
-        embed.setImage(imagens.banner);
-    }
-
-    // ======================================
-    // PRIMEIRA LINHA DE BOTÕES
-    // ======================================
-
-    const linha1 = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId('setup_calculadora')
-                .setLabel('Calculadora')
-                .setEmoji('🧮')
-                .setStyle(ButtonStyle.Primary),
-
-            new ButtonBuilder()
-                .setCustomId('setup_estoque')
-                .setLabel('Estoque')
-                .setEmoji('📦')
-                .setStyle(ButtonStyle.Secondary),
-
-            new ButtonBuilder()
-                .setCustomId('setup_vendas')
-                .setLabel('Vendas')
-                .setEmoji('💰')
-                .setStyle(ButtonStyle.Success),
-
-            new ButtonBuilder()
-                .setCustomId('setup_cargos')
-                .setLabel('Cargos')
-                .setEmoji('🏆')
-                .setStyle(ButtonStyle.Secondary)
+    } catch (erro) {
+        console.warn(
+            '[InovareSale] Não foi possível procurar o painel antigo:',
+            erro.message
         );
 
-    // ======================================
-    // SEGUNDA LINHA DE BOTÕES
-    // ======================================
-
-    const linha2 = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId('setup_tickets')
-                .setLabel('Tickets')
-                .setEmoji('🎫')
-                .setStyle(ButtonStyle.Primary),
-
-            new ButtonBuilder()
-                .setCustomId('setup_bloqueios')
-                .setLabel('Bloqueios')
-                .setEmoji('🔐')
-                .setStyle(ButtonStyle.Danger),
-
-            new ButtonBuilder()
-                .setCustomId('setup_pedidos')
-                .setLabel('Central de Pedidos')
-                .setEmoji('🛒')
-                .setStyle(ButtonStyle.Secondary)
-        );
-
-    return {
-        embeds: [embed],
-        components: [linha1, linha2]
-    };
-}
-
-// ==========================================
-// BUSCAR PAINEL ANTERIOR
-// ==========================================
-
-async function buscarPainelAnterior(guild, config) {
-    const canalId = config.setup?.painelCanalId;
-    const mensagemId = config.setup?.painelMensagemId;
-
-    if (!canalId || !mensagemId) {
         return null;
     }
-
-    try {
-        const canal = await guild.channels.fetch(canalId);
-
-        if (!canal?.isTextBased() || !canal.messages) {
-            return null;
-        }
-
-        const mensagem = await canal.messages.fetch(
-            mensagemId
-        );
-
-        if (mensagem.author.id !== guild.members.me?.id) {
-            return null;
-        }
-
-        return mensagem;
-    } catch {
-        return null;
-    }
-}
-
-// ==========================================
-// MONTAR PAINEL COM IMAGENS
-// ==========================================
-
-function criarPublicacaoNova() {
-    const imagens = {};
-
-    if (imagemDisponivel('banner.png')) {
-        imagens.banner = 'attachment://banner.png';
-    }
-
-    if (imagemDisponivel('logo.png')) {
-        imagens.logo = 'attachment://logo.png';
-    }
-
-    return {
-        ...criarPainelPrincipal(imagens),
-        files: arquivosDoPainel(),
-        allowedMentions: {
-            parse: []
-        }
-    };
 }
 
 // ==========================================
@@ -255,18 +64,35 @@ function criarPublicacaoNova() {
 // ==========================================
 
 module.exports = {
+
     data: new SlashCommandBuilder()
         .setName('setup')
         .setDescription(
-            'Publica o painel central da InovareSale.'
+            'Publica ou atualiza o painel administrativo da InovareSale'
         )
+        .setDMPermission(false)
         .setDefaultMemberPermissions(
             PermissionFlagsBits.Administrator
         ),
 
-    criarPainelPrincipal,
-
     async execute(interaction) {
+
+        // ==================================
+        // VERIFICAR SERVIDOR
+        // ==================================
+
+        if (!interaction.inGuild()) {
+            return interaction.reply({
+                content:
+                    'Este comando só funciona dentro do servidor.',
+                flags: MessageFlags.Ephemeral
+            });
+        }
+
+        // ==================================
+        // VERIFICAR ADMINISTRADOR
+        // ==================================
+
         if (
             !interaction.memberPermissions?.has(
                 PermissionFlagsBits.Administrator
@@ -274,144 +100,124 @@ module.exports = {
         ) {
             return interaction.reply({
                 content:
-                    '❌ Apenas administradores podem usar este comando.',
+                    'Somente administradores podem usar o /setup.',
                 flags: MessageFlags.Ephemeral
             });
         }
 
-        if (
-            !interaction.guild ||
-            interaction.channel?.type !==
-                ChannelType.GuildText
-        ) {
-            return interaction.reply({
-                content:
-                    '❌ Use `/setup` em um canal de texto do servidor.',
-                flags: MessageFlags.Ephemeral
-            });
-        }
+        // Resposta privada enquanto o bot
+        // prepara o painel público.
 
         await interaction.deferReply({
             flags: MessageFlags.Ephemeral
         });
 
         try {
-            const config = getConfig();
+            // ==================================
+            // VERIFICAR CANAL
+            // ==================================
 
-            if (!config.setup) {
-                config.setup = {};
+            const canal = interaction.channel;
+
+            if (
+                !canal ||
+                canal.type !== ChannelType.GuildText
+            ) {
+                return interaction.editReply({
+                    content:
+                        'Execute o /setup em um canal de texto do servidor.'
+                });
             }
 
-            const anterior = await buscarPainelAnterior(
-                interaction.guild,
+            // ==================================
+            // CARREGAR CONFIGURAÇÕES
+            // ==================================
+
+            const config = getConfig() || {};
+
+            // ==================================
+            // CRIAR PAINEL NOVO
+            // ==================================
+
+            // Usa o painel com banner.png,
+            // logo.png e os sete botões.
+
+            const painel = criarPublicacaoSetup(
                 config
             );
 
             // ==================================
-            // PAINEL JÁ ESTÁ NESTE CANAL
+            // LOCALIZAR PAINEL ANTIGO
             // ==================================
 
-            if (
-                anterior &&
-                anterior.channelId === interaction.channelId
-            ) {
-                const imagens = {};
-
-                const banner = anterior.attachments.find(
-                    arquivo => arquivo.name === 'banner.png'
-                );
-
-                const logo = anterior.attachments.find(
-                    arquivo => arquivo.name === 'logo.png'
-                );
-
-                if (banner) {
-                    imagens.banner = banner.url;
-                }
-
-                if (logo) {
-                    imagens.logo = logo.url;
-                }
-
-                await anterior.edit({
-                    ...criarPainelPrincipal(imagens),
-                    allowedMentions: {
-                        parse: []
-                    }
-                });
-
-                return interaction.editReply({
-                    content:
-                        `✅ O painel central já está neste canal!\n` +
-                        `[Clique aqui para visualizar](${anterior.url})`
-                });
-            }
-
-            // ==================================
-            // PUBLICAR PAINEL NO NOVO CANAL
-            // ==================================
-
-            const novoPainel = await interaction.channel.send(
-                criarPublicacaoNova()
+            const antigo = await localizarPainelAntigo(
+                canal,
+                interaction.client.user.id
             );
 
-            const canalAnteriorId =
-                config.setup.painelCanalId;
-
-            config.setup.painelCanalId =
-                novoPainel.channelId;
-
-            config.setup.painelMensagemId =
-                novoPainel.id;
-
-            saveConfig(config);
+            let mensagem;
+            let acao;
 
             // ==================================
-            // REMOVER PAINEL ANTERIOR
+            // ATUALIZAR PAINEL EXISTENTE
             // ==================================
 
-            let aviso = '';
-
-            if (
-                anterior &&
-                anterior.id !== novoPainel.id
-            ) {
+            if (antigo) {
                 try {
-                    await anterior.delete();
-                } catch (erro) {
-                    console.error(
-                        'Não foi possível apagar o painel anterior:',
-                        erro
+                    mensagem = await antigo.edit(
+                        painel
                     );
 
-                    aviso =
-                        '\n⚠️ Não consegui apagar o painel antigo. ' +
-                        'Você pode excluí-lo manualmente.';
+                    acao = 'atualizado';
+
+                } catch (erro) {
+                    console.warn(
+                        '[InovareSale] Erro ao atualizar painel antigo:',
+                        erro.message
+                    );
                 }
-            } else if (canalAnteriorId) {
-                // O painel antigo pode já ter sido apagado.
             }
 
-            await interaction.editReply({
+            // ==================================
+            // PUBLICAR PAINEL NOVO
+            // ==================================
+
+            if (!mensagem) {
+                mensagem = await canal.send(
+                    painel
+                );
+
+                acao = 'publicado';
+            }
+
+            // ==================================
+            // CONFIRMAÇÃO AO ADMINISTRADOR
+            // ==================================
+
+            return interaction.editReply({
                 content:
-                    '✅ **Painel Central publicado!**\n\n' +
-                    `📍 Canal: <#${novoPainel.channelId}>\n` +
-                    `[Abrir painel](${novoPainel.url})` +
-                    aviso
+                    `Painel administrativo ${acao} com sucesso!\n` +
+                    `[Abrir painel](${mensagem.url})`
             });
 
         } catch (erro) {
+
             console.error(
-                'Erro ao publicar o /setup:',
+                '[InovareSale] Erro no /setup:',
                 erro
             );
 
-            await interaction.editReply({
+            return interaction.editReply({
                 content:
-                    '❌ Não consegui publicar o painel. ' +
-                    'Verifique se o bot tem permissão de ' +
-                    'ver o canal, enviar mensagens, ' +
-                    'anexar arquivos e inserir links.'
+                    'Não foi possível publicar o painel.\n\n' +
+                    'Confira se o bot possui as permissões:\n' +
+                    '• Ver canal\n' +
+                    '• Enviar mensagens\n' +
+                    '• Inserir links\n' +
+                    '• Anexar arquivos\n\n' +
+                    `Detalhes: ${String(
+                        erro.message || erro
+                    ).slice(0, 500)}`
             });
         }
     }

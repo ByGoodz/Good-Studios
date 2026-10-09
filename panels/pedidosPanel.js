@@ -1,4 +1,6 @@
 
+'use strict';
+
 const {
     EmbedBuilder,
     ActionRowBuilder,
@@ -12,20 +14,43 @@ const path = require('path');
 
 // ==========================================
 // INOVARESALE BOT 2.0
-// CENTRAL DE PEDIDOS
+// PAINEL PUBLICO DE PEDIDOS
 // ==========================================
 
 const COR_PRINCIPAL = 0xC0C0C0;
 
+const PASTA_ASSETS = path.join(
+    __dirname,
+    '..',
+    'assets'
+);
+
+const MODALIDADES = [
+    {
+        chave: 'viaPlus',
+        nome: 'Via Plus'
+    },
+    {
+        chave: 'semTaxa',
+        nome: 'Robux Sem Taxa'
+    },
+    {
+        chave: 'taxado',
+        nome: 'Robux Taxado'
+    },
+    {
+        chave: 'viaGrupo',
+        nome: 'Robux Via Grupo'
+    }
+];
+
 // ==========================================
-// BUSCAR IMAGENS
+// CARREGAR IMAGEM PNG
 // ==========================================
 
-function buscarImagem(nome) {
+function carregarImagem(nome) {
     const caminho = path.join(
-        __dirname,
-        '..',
-        'assets',
+        PASTA_ASSETS,
         nome
     );
 
@@ -37,182 +62,220 @@ function buscarImagem(nome) {
             info.size <= 0 ||
             info.size > 8 * 1024 * 1024
         ) {
+            console.warn(
+                `[InovareSale] Imagem ausente ou inválida: ${nome}`
+            );
+
+            return null;
+        }
+
+        // Conferir se é um PNG verdadeiro.
+        const assinatura = Buffer.alloc(8);
+
+        const arquivo = fs.openSync(
+            caminho,
+            'r'
+        );
+
+        try {
+            fs.readSync(
+                arquivo,
+                assinatura,
+                0,
+                8,
+                0
+            );
+        } finally {
+            fs.closeSync(arquivo);
+        }
+
+        const assinaturaPng = Buffer.from([
+            137, 80, 78, 71,
+            13, 10, 26, 10
+        ]);
+
+        if (!assinatura.equals(assinaturaPng)) {
+            console.warn(
+                `[InovareSale] ${nome} não é um PNG verdadeiro.`
+            );
+
             return null;
         }
 
         return new AttachmentBuilder(
             caminho,
-            { name: nome }
+            {
+                name: nome
+            }
         );
 
-    } catch {
+    } catch (erro) {
+        console.warn(
+            `[InovareSale] Não foi possível carregar ${nome}:`,
+            erro.message
+        );
+
         return null;
     }
 }
 
 // ==========================================
-// FORMATAR CANAL
+// VERIFICAR MODALIDADES DISPONIVEIS
 // ==========================================
 
-function formatarCanal(canalId) {
-    if (!canalId) {
-        return 'Não configurado';
-    }
-
-    return `<#${canalId}>`;
-}
-
-// ==========================================
-// CONSULTAR MODALIDADES
-// ==========================================
-
-function obterStatusModalidades(config) {
+function obterStatusModalidades(config = {}) {
     const bloqueados =
         config.tickets?.bloqueados || {};
 
-    const modalidades = [
-        {
-            chave: 'viaPlus',
-            nome: 'Via Plus',
-            emoji: '➕'
-        },
-        {
-            chave: 'semTaxa',
-            nome: 'Robux Sem Taxa',
-            emoji: '💸'
-        },
-        {
-            chave: 'taxado',
-            nome: 'Robux Taxado',
-            emoji: '💰'
-        },
-        {
-            chave: 'viaGrupo',
-            nome: 'Robux Via Grupo',
-            emoji: '👥'
-        }
-    ];
+    const calculadora =
+        config.calculadora || {};
 
-    return modalidades.map(metodo => {
+    return MODALIDADES.map(metodo => {
+        const chave = metodo.chave;
+
+        const valorK = calculadora[chave];
+
+        const precoValido =
+            valorK !== null &&
+            valorK !== undefined &&
+            valorK !== false &&
+            Number.isFinite(Number(valorK)) &&
+            Number(valorK) > 0;
+
+        // Via Grupo começa bloqueado.
         const bloqueado =
-            metodo.chave === 'viaGrupo'
-                ? bloqueados[metodo.chave] !== false
-                : bloqueados[metodo.chave] === true;
+            chave === 'viaGrupo'
+                ? bloqueados.viaGrupo !== false
+                : bloqueados[chave] === true;
 
         return {
             ...metodo,
-            bloqueado
+            disponivel: precoValido && !bloqueado,
+            precoK: precoValido
+                ? Number(valorK)
+                : null
         };
     });
 }
 
 // ==========================================
-// CRIAR EMBED PÚBLICO
+// CRIAR EMBED DE PEDIDOS
 // ==========================================
 
-function criarEmbedPedidos(config) {
+function criarEmbedPedidos(config = {}) {
     const modalidades =
         obterStatusModalidades(config);
 
     const lista = modalidades
         .map(metodo => {
-            const status = metodo.bloqueado
-                ? '🔴 Indisponível'
-                : '🟢 Disponível';
+            const status = metodo.disponivel
+                ? 'Disponível'
+                : 'Indisponível';
 
             return (
-                `${metodo.emoji} **${metodo.nome}**\n` +
+                `**${metodo.nome}**\n` +
                 `↳ ${status}`
             );
         })
         .join('\n\n');
 
-    return new EmbedBuilder()
+    const embed = new EmbedBuilder()
         .setColor(COR_PRINCIPAL)
 
         .setTitle(
-            '💎 CENTRAL DE PEDIDOS — INOVARESALE'
+            'CENTRAL DE PEDIDOS | INOVARESALE'
         )
 
         .setDescription(
-            'Seja bem-vindo à **InovareSale**!\n\n' +
+            '**BEM-VINDO À INOVARESALE**\n\n' +
 
-            'Nossa central de pedidos foi criada ' +
-            'para facilitar sua compra de Robux.\n\n' +
-
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-            '🛒 **COMPRE AGORA MESMO**\n\n' +
-
-            'Escolha a quantidade de Robux, ' +
-            'selecione a modalidade desejada ' +
-            'e abra um ticket com nossa equipe.\n\n' +
+            'Sua central de compras de Robux, ' +
+            'com atendimento organizado e privado.\n\n' +
 
             '━━━━━━━━━━━━━━━━━━━━\n\n' +
 
-            '✨ **MODALIDADES DE COMPRA**\n\n' +
+            '**COMO REALIZAR SUA COMPRA**\n\n' +
+
+            'Clique no botão **Comprar quantia específica** ' +
+            'para começar seu pedido.\n\n' +
+
+            'Você poderá informar a quantidade de Robux, ' +
+            'escolher a modalidade, preencher seu usuário ' +
+            'do Roblox e selecionar o pagamento.\n\n' +
+
+            'Ao confirmar, um ticket privado será criado ' +
+            'para você conversar com nossa equipe.\n\n' +
+
+            '━━━━━━━━━━━━━━━━━━━━\n\n' +
+
+            '**MODALIDADES DE COMPRA**\n\n' +
 
             `${lista}\n\n` +
 
             '━━━━━━━━━━━━━━━━━━━━\n\n' +
 
-            '🧮 **QUER CONSULTAR OS PREÇOS?**\n\n' +
+            '**CONSULTAR VALORES**\n\n' +
 
-            'Clique em **Calcular valores** ' +
-            'para acessar nossa calculadora.\n\n' +
+            'Quer saber quanto vai pagar antes de comprar?\n' +
+            'Use o botão **Calcular valores** para acessar ' +
+            'a calculadora da loja.\n\n' +
 
-            '🛡️ **SEGURANÇA**\n' +
-            'Realize pagamentos somente após ' +
-            'a confirmação da equipe.\n\n' +
+            '━━━━━━━━━━━━━━━━━━━━\n\n' +
 
-            '💬 **ATENDIMENTO**\n' +
-            'Ao abrir um pedido, você receberá ' +
-            'um canal privado para conversar ' +
-            'com nossos atendentes.'
+            '**INFORMAÇÕES IMPORTANTES**\n\n' +
+
+            '• O valor será calculado conforme a modalidade escolhida.\n' +
+            '• O atendimento acontece em um ticket privado.\n' +
+            '• Nunca compartilhe sua senha do Roblox.\n' +
+            '• Realize o pagamento somente após orientação da equipe.'
         )
 
         .setFooter({
-            text:
-                'InovareSale • Sua loja de Robux'
+            text: 'INOVARESALE • CENTRAL DE COMPRAS'
         });
+
+    return embed;
 }
 
 // ==========================================
-// BOTÃO DE COMPRA
+// BOTAO COMPRAR
 // ==========================================
 
-function criarBotaoComprar(config) {
+function criarBotaoComprar(config = {}) {
     const modalidades =
         obterStatusModalidades(config);
 
-    const todasBloqueadas =
-        modalidades.every(
-            metodo => metodo.bloqueado
+    const algumaDisponivel =
+        modalidades.some(
+            metodo => metodo.disponivel
         );
 
     return new ButtonBuilder()
         .setCustomId('ticket_abrir')
         .setLabel('Comprar quantia específica')
-        .setEmoji('🛒')
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(todasBloqueadas);
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(!algumaDisponivel);
 }
 
 // ==========================================
-// BOTÃO DA CALCULADORA
+// BOTAO CALCULAR VALORES
 // ==========================================
 
 function criarBotaoCalcular(
-    config,
-    guildId
+    config = {},
+    guildId = null
 ) {
     const canalId =
         config.calculadora?.canalId;
 
-    if (canalId && guildId) {
+    if (
+        guildId &&
+        /^\d{15,22}$/.test(String(guildId)) &&
+        canalId &&
+        /^\d{15,22}$/.test(String(canalId))
+    ) {
         return new ButtonBuilder()
             .setLabel('Calcular valores')
-            .setEmoji('🧮')
             .setStyle(ButtonStyle.Link)
             .setURL(
                 `https://discord.com/channels/` +
@@ -225,13 +288,12 @@ function criarBotaoCalcular(
             'ticket_calculadora_indisponivel'
         )
         .setLabel('Calcular valores')
-        .setEmoji('🧮')
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(true);
 }
 
 // ==========================================
-// CRIAR PAINEL COMPLETO
+// MONTAR PAINEL COMPLETO
 // ==========================================
 
 function criarPainelPedidos(
@@ -242,8 +304,11 @@ function criarPainelPedidos(
 
     const arquivos = [];
 
-    // Logo
-    const logo = buscarImagem('logo.png');
+    // ======================================
+    // LOGO
+    // ======================================
+
+    const logo = carregarImagem('logo.png');
 
     if (logo) {
         arquivos.push(logo);
@@ -253,8 +318,11 @@ function criarPainelPedidos(
         );
     }
 
-    // Banner
-    const banner = buscarImagem('banner.png');
+    // ======================================
+    // BANNER PRINCIPAL
+    // ======================================
+
+    const banner = carregarImagem('banner.png');
 
     if (banner) {
         arquivos.push(banner);
@@ -264,7 +332,10 @@ function criarPainelPedidos(
         );
     }
 
-    // Botões
+    // ======================================
+    // BOTOES
+    // ======================================
+
     const botoes = new ActionRowBuilder()
         .addComponents(
             criarBotaoComprar(config),
@@ -273,6 +344,10 @@ function criarPainelPedidos(
                 guildId
             )
         );
+
+    // ======================================
+    // RETORNO PARA O DISCORD
+    // ======================================
 
     return {
         embeds: [embed],
@@ -286,11 +361,13 @@ function criarPainelPedidos(
 }
 
 // ==========================================
-// EXPORTAR FUNÇÕES
+// EXPORTAÇÕES
 // ==========================================
 
 module.exports = {
     criarPainelPedidos,
     criarEmbedPedidos,
-    obterStatusModalidades
+    obterStatusModalidades,
+    criarBotaoComprar,
+    criarBotaoCalcular
 };

@@ -2,8 +2,10 @@ const {
     ActionRowBuilder, ButtonBuilder, ButtonStyle,
     ModalBuilder, TextInputBuilder, TextInputStyle,
     EmbedBuilder, ChannelType, PermissionFlagsBits,
-    MessageFlags
+    MessageFlags, AttachmentBuilder
 } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
 
 const { db, registrarLog } = require('../database/db');
 const { getConfig } = require('../utils/storage');
@@ -171,37 +173,75 @@ function linhaMetodos(config) {
 }
 
 function painelTicket(ticket, usuario, quote) {
-    const descricao = [
-        `👤 **Cliente:** <@${ticket.cliente_id}>`,
-        `🎮 **Roblox:** \`${usuario}\``,
-        `💎 **Quantidade solicitada:** ${formatarRobux(ticket.quantidade_robux)}`,
-        `📦 **Modalidade:** ${METODOS[ticket.modalidade]}`,
-        `💰 **Preço estimado:** ${formatarReaisCentavos(ticket.preco_centavos)}`,
-        `💳 **Pagamento:** ${ticket.pagamento === 'pix' ? 'PIX' : 'Solicitar MM'}`,
-        `✅ **Robux a receber:** ${formatarRobux(quote.recebido)}`,
-        ...(quote.gamepass === null ? [] : [
-            `🎟️ **Gamepass necessária:** ${formatarRobux(quote.gamepass)}`
-        ]),
-        '',
-        '⏳ **Aguardando atendimento da equipe.**',
-        '⚠️ Não envie senhas. Pague apenas após orientação da equipe.'
-    ].join('\n');
+    const pedidoId = `INV-${String(ticket.id).padStart(4, '0')}`;
+    const modalidade = METODOS[ticket.modalidade] || 'Nao informada';
+    const pagamento = ticket.pagamento === 'pix' ? 'PIX' : 'Solicitar MM';
+    const username = String(usuario || 'Nao informado')
+        .replace(/[`\r\n]/g, '')
+        .slice(0, 30);
 
     const embed = new EmbedBuilder()
         .setColor(0xC0C0C0)
-        .setTitle(`🛒 Pedido INV-${String(ticket.id).padStart(4, '0')}`)
-        .setDescription(descricao)
-        .setFooter({ text: 'InovareSale • Atendimento de compras' });
+        .setTitle(`InovareSale | Pedido ${pedidoId}`)
+        .setDescription(
+            'Seu pedido foi criado. Confira os dados abaixo e aguarde a equipe.\n\n' +
+            `**Cliente:** <@${ticket.cliente_id}>\n` +
+            `**Usuario Roblox:** \`${username}\`\n` +
+            `**Quantidade solicitada:** ${formatarRobux(ticket.quantidade_robux)} Robux\n` +
+            `**Modalidade:** ${modalidade}\n` +
+            `**Valor estimado:** ${formatarReaisCentavos(ticket.preco_centavos)}\n` +
+            `**Pagamento:** ${pagamento}\n` +
+            `**Robux a receber:** ${formatarRobux(quote.recebido)}` +
+            (quote.gamepass == null ? '' :
+                `\n**Gamepass necessaria:** ${formatarRobux(quote.gamepass)} Robux`) +
+            '\n\n**Status:** Aguardando atendimento.\n' +
+            'Nunca compartilhe senhas nem pague sem confirmacao da equipe.'
+        )
+        .setFooter({ text: `InovareSale • ${pedidoId}` })
+        .setTimestamp();
 
     const botoes = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('ticket_assumir')
-            .setLabel('Assumir atendimento').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('ticket_finalizar')
-            .setLabel('Finalizar venda').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('ticket_cancelar')
-            .setLabel('Cancelar').setStyle(ButtonStyle.Danger)
+        new ButtonBuilder()
+            .setCustomId('ticket_assumir')
+            .setLabel('Assumir atendimento')
+            .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+            .setCustomId('ticket_finalizar')
+            .setLabel('Finalizar venda')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('ticket_cancelar')
+            .setLabel('Cancelar')
+            .setStyle(ButtonStyle.Danger)
     );
-    return { embeds: [embed], components: [botoes], allowedMentions: { parse: [] } };
+
+    const resposta = {
+        embeds: [embed],
+        components: [botoes],
+        allowedMentions: { parse: [] }
+    };
+
+    // Usar o PNG original que ja esta em assets/banner.png.
+    const caminhoBanner = path.join(__dirname, '..', 'assets', 'banner.png');
+    const assinaturaPNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
+    if (!fs.existsSync(caminhoBanner)) {
+        console.error('[InovareSale] Nao encontrei assets/banner.png.');
+        return resposta;
+    }
+
+    try {
+        const dados = fs.readFileSync(caminhoBanner);
+        if (dados.length < 100 || !dados.subarray(0, 8).equals(assinaturaPNG)) {
+            throw new Error('assets/banner.png nao e um PNG valido.');
+        }
+        embed.setImage('attachment://banner.png');
+        resposta.files = [new AttachmentBuilder(dados, { name: 'banner.png' })];
+    } catch (erro) {
+        console.error('[InovareSale] Falha ao carregar banner do ticket:', erro);
+    }
+
+    return resposta;
 }
 
 async function criarTicket(interaction, rascunho) {

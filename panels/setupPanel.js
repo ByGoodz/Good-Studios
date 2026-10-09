@@ -1,4 +1,6 @@
 
+'use strict';
+
 const {
     EmbedBuilder,
     ActionRowBuilder,
@@ -12,10 +14,10 @@ const path = require('path');
 
 // ==========================================
 // INOVARESALE BOT 2.0
-// PAINEL CENTRAL DE CONFIGURAÇÕES
+// PAINEL CENTRAL ADMINISTRATIVO
 // ==========================================
 
-const COR_PRINCIPAL = 0xC0C0C0;
+const COR_PRATA = 0xC0C0C0;
 
 const PASTA_ASSETS = path.join(
     __dirname,
@@ -24,10 +26,10 @@ const PASTA_ASSETS = path.join(
 );
 
 // ==========================================
-// CARREGAR IMAGENS
+// CARREGAR AS IMAGENS ORIGINAIS
 // ==========================================
 
-function buscarImagem(nome) {
+function carregarImagem(nome) {
     const caminho = path.join(
         PASTA_ASSETS,
         nome
@@ -38,40 +40,85 @@ function buscarImagem(nome) {
 
         if (
             !info.isFile() ||
-            info.size === 0 ||
+            info.size <= 0 ||
             info.size > 8 * 1024 * 1024
         ) {
+            console.warn(
+                `[InovareSale] Imagem inválida: ${nome}`
+            );
+
             return null;
         }
 
-        return new AttachmentBuilder(caminho, {
-            name: nome
-        });
+        const assinatura = Buffer.alloc(8);
 
-    } catch {
+        const arquivo = fs.openSync(
+            caminho,
+            'r'
+        );
+
+        try {
+            fs.readSync(
+                arquivo,
+                assinatura,
+                0,
+                8,
+                0
+            );
+        } finally {
+            fs.closeSync(arquivo);
+        }
+
+        const png = Buffer.from([
+            137, 80, 78, 71,
+            13, 10, 26, 10
+        ]);
+
+        if (!assinatura.equals(png)) {
+            console.warn(
+                `[InovareSale] ${nome} não é PNG válido.`
+            );
+
+            return null;
+        }
+
+        return new AttachmentBuilder(
+            caminho,
+            { name: nome }
+        );
+
+    } catch (erro) {
+        console.warn(
+            `[InovareSale] Falha ao carregar ${nome}:`,
+            erro.message
+        );
+
         return null;
     }
 }
 
 // ==========================================
-// FORMATAR INFORMAÇÕES
+// FORMATAR OS DADOS
 // ==========================================
 
-function formatarCanal(canalId) {
-    return canalId
-        ? `<#${canalId}>`
+function formatarCanal(id) {
+    return id
+        ? `<#${id}>`
         : '`Não configurado`';
 }
 
 function formatarStatus(status) {
     return status === 'ON'
-        ? '🟢 Aberta'
-        : '🔴 Fechada';
+        ? 'ONLINE'
+        : 'OFFLINE';
 }
 
-function contarModalidades(config) {
+function contarModalidades(config = {}) {
     const bloqueados =
         config.tickets?.bloqueados || {};
+
+    const calc =
+        config.calculadora || {};
 
     const metodos = [
         'viaPlus',
@@ -80,17 +127,26 @@ function contarModalidades(config) {
         'viaGrupo'
     ];
 
-    return metodos.filter(metodo => {
-        if (metodo === 'viaGrupo') {
-            return bloqueados[metodo] === false;
-        }
+    return metodos.filter(chave => {
+        const preco = calc[chave];
 
-        return bloqueados[metodo] !== true;
+        const valido =
+            preco !== null &&
+            preco !== undefined &&
+            Number.isFinite(Number(preco)) &&
+            Number(preco) > 0;
+
+        const bloqueado =
+            chave === 'viaGrupo'
+                ? bloqueados.viaGrupo !== false
+                : bloqueados[chave] === true;
+
+        return valido && !bloqueado;
     }).length;
 }
 
 // ==========================================
-// CRIAR EMBED PRINCIPAL
+// EMBED PRINCIPAL
 // ==========================================
 
 function criarEmbedSetup(config = {}) {
@@ -99,89 +155,91 @@ function criarEmbedSetup(config = {}) {
     const vendas = config.vendas || {};
     const tickets = config.tickets || {};
 
-    const modalidadesAtivas =
-        contarModalidades(config);
+    const status = formatarStatus(
+        estoque.status
+    );
+
+    const modalidades = contarModalidades(
+        config
+    );
 
     const embed = new EmbedBuilder()
-        .setColor(COR_PRINCIPAL)
+        .setColor(COR_PRATA)
 
         .setTitle(
-            '⚙️ CENTRAL ADMINISTRATIVA — INOVARESALE'
+            'INOVARESALE  |  CENTRAL ADMINISTRATIVA'
         )
 
         .setDescription(
-            '💎 **Bem-vindo ao Painel Central 2.0!**\n\n' +
+            '**PAINEL DE CONTROLE — VERSÃO 2.0**\n\n' +
 
-            'Gerencie todas as funcionalidades ' +
-            'da InovareSale diretamente pelo Discord.\n\n' +
+            'Gerencie sua loja, pedidos e atendimento ' +
+            'diretamente por este painel.\n\n' +
 
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
+            '━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
 
-            '🧮 **CALCULADORA**\n' +
-            'Configure os valores K, modalidades ' +
-            'e canal de cálculos.\n\n' +
+            '**GERENCIAMENTO DA LOJA**\n\n' +
 
-            '📦 **ESTOQUE**\n' +
-            'Gerencie o status da loja, os canais ' +
-            'e o preço exibido.\n\n' +
+            '**Calculadora**\n' +
+            'Configure os preços K e o canal de cálculos.\n\n' +
 
-            '💰 **VENDAS**\n' +
-            'Configure o canal das vendas ' +
-            'e acompanhe os registros.\n\n' +
+            '**Estoque**\n' +
+            'Gerencie os canais, o preço e o estoque disponível.\n\n' +
 
-            '🏆 **CARGOS**\n' +
-            'Gerencie os níveis de clientes ' +
-            'e as recompensas automáticas.\n\n' +
+            '**Vendas**\n' +
+            'Defina onde as compras concluídas serão anunciadas.\n\n' +
 
-            '🎫 **TICKETS**\n' +
-            'Configure equipe de atendimento, ' +
-            'categorias e permissões.\n\n' +
+            '**Cargos**\n' +
+            'Configure as classificações automáticas dos clientes.\n\n' +
 
-            '🔐 **BLOQUEIOS**\n' +
-            'Libere ou bloqueie novas compras ' +
-            'por modalidade.\n\n' +
+            '━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
 
-            '🛒 **CENTRAL DE PEDIDOS**\n' +
-            'Configure e publique o painel ' +
-            'onde os clientes iniciam suas compras.\n\n' +
+            '**ATENDIMENTO E COMPRAS**\n\n' +
 
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
+            '**Tickets**\n' +
+            'Configure a equipe e as categorias de atendimento.\n\n' +
 
-            '🛡️ **ACESSO RESTRITO**\n' +
-            'Somente administradores podem ' +
-            'alterar as configurações.'
+            '**Bloqueios**\n' +
+            'Libere ou interrompa compras por modalidade.\n\n' +
+
+            '**Central de Pedidos**\n' +
+            'Publique o painel de compras com o banner da loja.\n\n' +
+
+            '━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+
+            '**ACESSO ADMINISTRATIVO**\n' +
+            'O painel pode ser visualizado por todos, ' +
+            'mas somente administradores podem alterar ' +
+            'as configurações.'
         )
 
         .addFields(
             {
-                name: '🏪 Status da loja',
-                value: formatarStatus(
-                    estoque.status
-                ),
+                name: 'STATUS DA LOJA',
+                value: `**${status}**`,
                 inline: true
             },
             {
-                name: '🎫 Modalidades liberadas',
-                value:
-                    `**${modalidadesAtivas}/4**`,
+                name: 'MODALIDADES ATIVAS',
+                value: `**${modalidades}/4**`,
                 inline: true
             },
             {
-                name: '🧮 Canal da calculadora',
+                name: 'CANAL DA CALCULADORA',
                 value: formatarCanal(
                     calculadora.canalId
                 ),
                 inline: false
             },
             {
-                name: '📢 Canal de vendas',
+                name: 'CANAL DE VENDAS',
                 value: formatarCanal(
                     vendas.canalId
                 ),
                 inline: false
             },
             {
-                name: '🛒 Central de Pedidos',
+                name: 'CENTRAL DE PEDIDOS',
                 value: formatarCanal(
                     tickets.painelCanalId
                 ),
@@ -191,93 +249,69 @@ function criarEmbedSetup(config = {}) {
 
         .setFooter({
             text:
-                'InovareSale Bot 2.0 • Painel Administrativo'
-        })
-
-        .setTimestamp();
+                'INOVARESALE • PAINEL DE CONTROLE'
+        });
 
     return embed;
 }
 
 // ==========================================
-// BOTÕES DA PRIMEIRA LINHA
+// PRIMEIRA LINHA DE BOTÕES
 // ==========================================
 
 function criarLinhaPrincipal() {
     return new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder()
-                .setCustomId(
-                    'setup_calculadora'
-                )
+                .setCustomId('setup_calculadora')
                 .setLabel('Calculadora')
-                .setEmoji('🧮')
                 .setStyle(ButtonStyle.Primary),
 
             new ButtonBuilder()
-                .setCustomId(
-                    'setup_estoque'
-                )
+                .setCustomId('setup_estoque')
                 .setLabel('Estoque')
-                .setEmoji('📦')
                 .setStyle(ButtonStyle.Secondary),
 
             new ButtonBuilder()
-                .setCustomId(
-                    'setup_vendas'
-                )
+                .setCustomId('setup_vendas')
                 .setLabel('Vendas')
-                .setEmoji('💰')
                 .setStyle(ButtonStyle.Success),
 
             new ButtonBuilder()
-                .setCustomId(
-                    'setup_cargos'
-                )
+                .setCustomId('setup_cargos')
                 .setLabel('Cargos')
-                .setEmoji('🏆')
                 .setStyle(ButtonStyle.Secondary)
         );
 }
 
 // ==========================================
-// BOTÕES DA SEGUNDA LINHA
+// SEGUNDA LINHA DE BOTÕES
 // ==========================================
 
 function criarLinhaAvancada() {
     return new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder()
-                .setCustomId(
-                    'setup_tickets'
-                )
+                .setCustomId('setup_tickets')
                 .setLabel('Tickets')
-                .setEmoji('🎫')
                 .setStyle(ButtonStyle.Primary),
 
             new ButtonBuilder()
-                .setCustomId(
-                    'setup_bloqueios'
-                )
+                .setCustomId('setup_bloqueios')
                 .setLabel('Bloqueios')
-                .setEmoji('🔐')
                 .setStyle(ButtonStyle.Danger),
 
             new ButtonBuilder()
-                .setCustomId(
-                    'setup_pedidos'
-                )
+                .setCustomId('setup_pedidos')
                 .setLabel('Central de Pedidos')
-                .setEmoji('🛒')
                 .setStyle(ButtonStyle.Secondary)
         );
 }
 
 // ==========================================
-// CRIAR PAINEL SEM ANEXAR IMAGENS
+// PAINEL SEM NOVOS ANEXOS
 //
-// Útil para atualizar mensagens existentes
-// ou mostrar submenus administrativos.
+// Usado nos submenus administrativos.
 // ==========================================
 
 function criarPainelSetup(
@@ -296,10 +330,12 @@ function criarPainelSetup(
 
     return {
         embeds: [embed],
+
         components: [
             criarLinhaPrincipal(),
             criarLinhaAvancada()
         ],
+
         allowedMentions: {
             parse: []
         }
@@ -307,9 +343,9 @@ function criarPainelSetup(
 }
 
 // ==========================================
-// CRIAR PAINEL COM LOGO E BANNER
+// PUBLICAÇÃO COMPLETA COM AS IMAGENS
 //
-// Usado para publicar uma mensagem nova.
+// Usada ao executar /setup.
 // ==========================================
 
 function criarPublicacaoSetup(config = {}) {
@@ -317,7 +353,8 @@ function criarPublicacaoSetup(config = {}) {
 
     const arquivos = [];
 
-    const logo = buscarImagem('logo.png');
+    // Logo original da InovareSale.
+    const logo = carregarImagem('logo.png');
 
     if (logo) {
         arquivos.push(logo);
@@ -327,7 +364,8 @@ function criarPublicacaoSetup(config = {}) {
         );
     }
 
-    const banner = buscarImagem('banner.png');
+    // Banner original da InovareSale.
+    const banner = carregarImagem('banner.png');
 
     if (banner) {
         arquivos.push(banner);
@@ -354,13 +392,13 @@ function criarPublicacaoSetup(config = {}) {
 }
 
 // ==========================================
-// EXPORTAR FUNÇÕES
+// EXPORTAÇÕES
 // ==========================================
 
 module.exports = {
+    criarEmbedSetup,
     criarPainelSetup,
     criarPublicacaoSetup,
-    criarEmbedSetup,
     criarLinhaPrincipal,
     criarLinhaAvancada
 };

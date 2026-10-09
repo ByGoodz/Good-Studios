@@ -1,7 +1,16 @@
-
 'use strict';
 
-const { EmbedBuilder, ChannelType } = require('discord.js');
+const {
+    EmbedBuilder,
+    ChannelType,
+    AttachmentBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle
+} = require('discord.js');
+const fs = require('fs');
+const path = require('path');
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { db } = require('../database/db');
 const { getConfig } = require('../utils/storage');
 const { obterCargoIdeal, atualizarCargo } = require('../utils/roles');
@@ -128,58 +137,243 @@ function validarTicketParaVenda(ticketId, guildId, clienteId) {
     return ticket;
 }
 
-function criarEmbedVenda({
-    clienteId, registradoPorId, valor, robux,
-    modalidade, usuarioRoblox, pagamento, ticketId,
-    totalCompras
-}) {
-    const embed = new EmbedBuilder()
-        .setColor(0xC0C0C0)
-        .setTitle('💎 VENDA CONCLUÍDA — INOVARESALE')
-        .setDescription(
-            'Uma nova compra foi registrada com sucesso!\n\n' +
-            `👤 **Cliente:** <@${clienteId}>\n` +
-            `💎 **Robux adquiridos:** ${formatarRobux(robux)}\n` +
-            `💰 **Valor pago:** ${formatarDinheiro(valor)}\n` +
-            `📦 **Modalidade:** ${MODALIDADES[modalidade] || 'Não informada'}\n` +
-            `💳 **Pagamento:** ${PAGAMENTOS[pagamento] || 'Não informado'}\n` +
-            (usuarioRoblox
-                ? `🎮 **Roblox:** \`${normalizarTexto(usuarioRoblox, 50).replace(/`/g, '')}\`\n`
-                : '') +
-            (ticketId
-                ? `🎫 **Pedido:** INV-${String(ticketId).padStart(4, '0')}\n`
-                : '') +
-            `🛍️ **Compras do cliente:** ${totalCompras}\n\n` +
-            '✨ Obrigado por escolher a InovareSale!'
-        )
-        .setFooter({
-            text: `Venda registrada pela equipe • ${registradoPorId}`
-        })
-        .setTimestamp();
+// ==========================================
+// MODELO VISUAL DA VENDA
+// Imagem: assets/compra-base.png
+// Todos os dados mostrados sao reais, vindos da venda.
+// ==========================================
 
-    return embed;
+const CAMINHO_MODELO_COMPRA = path.join(
+    __dirname, '..', 'assets', 'compra-base.png'
+);
+
+function nomeSeguro(valor, limite = 60) {
+    return String(valor || 'Nao informado')
+        .replace(/[\r\n\t]/g, ' ')
+        .replace(/[@<>`]/g, '')
+        .trim()
+        .slice(0, limite);
+}
+
+function caixaArredondada(ctx, x, y, largura, altura, raio) {
+    const r = Math.min(raio, largura / 2, altura / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + largura - r, y);
+    ctx.quadraticCurveTo(x + largura, y, x + largura, y + r);
+    ctx.lineTo(x + largura, y + altura - r);
+    ctx.quadraticCurveTo(x + largura, y + altura, x + largura - r, y + altura);
+    ctx.lineTo(x + r, y + altura);
+    ctx.quadraticCurveTo(x, y + altura, x, y + altura - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
+
+function escreverTexto(ctx, texto, x, y, largura, tamanho = 26, cor = '#FFFFFF') {
+    ctx.font = `600 ${tamanho}px Arial`;
+    ctx.fillStyle = cor;
+    ctx.textAlign = 'left';
+    ctx.fillText(String(texto), x, y, largura);
+}
+
+function desenharLinha(ctx, rotulo, valor, y) {
+    escreverTexto(ctx, rotulo.toUpperCase(), 554, y, 305, 19, '#B4B2C4');
+    escreverTexto(ctx, valor, 865, y + 1, 405, 25, '#F5F2FF');
+    ctx.strokeStyle = 'rgba(180, 149, 223, 0.28)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(550, y + 16);
+    ctx.lineTo(1266, y + 16);
+    ctx.stroke();
+}
+
+function validarArquivoPNG(caminho) {
+    const info = fs.statSync(caminho);
+    if (!info.isFile() || info.size < 100 || info.size > 8 * 1024 * 1024) {
+        throw new Error('compra-base.png esta vazio ou ultrapassa 8 MB.');
+    }
+
+    const assinatura = Buffer.alloc(8);
+    const fd = fs.openSync(caminho, 'r');
+    try {
+        fs.readSync(fd, assinatura, 0, 8, 0);
+    } finally {
+        fs.closeSync(fd);
+    }
+
+    if (!assinatura.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+        throw new Error('compra-base.png nao e um PNG verdadeiro.');
+    }
+}
+
+async function gerarImagemVenda(guild, dados) {
+    validarArquivoPNG(CAMINHO_MODELO_COMPRA);
+
+    const fundo = await loadImage(CAMINHO_MODELO_COMPRA);
+    const canvas = createCanvas(1672, 941);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(fundo, 0, 0, 1672, 941);
+
+    // Cobre integralmente os dados FALSOS impressos no modelo.
+    // O personagem e a moldura originais permanecem visiveis.
+    caixaArredondada(ctx, 514, 269, 797, 509, 18);
+    ctx.fillStyle = 'rgba(5, 5, 12, 0.985)';
+    ctx.fill();
+    ctx.strokeStyle = '#715094';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    let usuario = null;
+    try {
+        usuario = await guild.client.users.fetch(dados.clienteId);
+    } catch (erro) {
+        console.warn('[InovareSale] Nao consegui obter o avatar do comprador:', erro.message);
+    }
+
+    const nomeComprador = nomeSeguro(
+        usuario?.globalName || usuario?.username || `Usuario ${dados.clienteId}`,
+        42
+    );
+    const dataCompra = new Date(dados.registradoEm || Date.now()).toLocaleString(
+        'pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'short' }
+    );
+
+    escreverTexto(ctx, 'COMPRA REALIZADA', 546, 334, 735, 43, '#FFFFFF');
+    escreverTexto(ctx, `Cliente: ${nomeComprador}`, 548, 377, 724, 25, '#CFA9FF');
+    escreverTexto(ctx, dataCompra, 550, 410, 700, 19, '#C6C0D0');
+
+    ctx.strokeStyle = '#A976E9';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(548, 430);
+    ctx.lineTo(1267, 430);
+    ctx.stroke();
+
+    desenharLinha(ctx, 'Usuario Roblox', nomeSeguro(dados.usuarioRoblox || 'Nao informado', 30), 475);
+    desenharLinha(ctx, 'Robux comprados', `${formatarRobux(dados.robux)} Robux`, 528);
+    desenharLinha(ctx, 'Modalidade', MODALIDADES[dados.modalidade] || 'Nao informada', 581);
+    desenharLinha(ctx, 'Valor pago', formatarDinheiro(dados.valor), 634);
+    desenharLinha(ctx, 'Pagamento', PAGAMENTOS[dados.pagamento] || 'Nao informado', 687);
+
+    const pedido = dados.ticketId
+        ? `Pedido INV-${String(dados.ticketId).padStart(4, '0')}`
+        : 'Venda registrada pela equipe';
+    escreverTexto(ctx, pedido, 554, 752, 600, 21, '#CFA9FF');
+
+    // O botao DESENHADO na imagem nao e clicavel.
+    // O botao verdadeiro sera enviado como componente do Discord.
+    caixaArredondada(ctx, 523, 784, 570, 82, 14);
+    ctx.fillStyle = 'rgba(7, 6, 14, 0.99)';
+    ctx.fill();
+    ctx.strokeStyle = '#A976E9';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    escreverTexto(ctx, 'OBRIGADO PELA COMPRA', 552, 834, 512, 27, '#FFFFFF');
+
+    // Substitui a foto de exemplo pela foto real do Discord.
+    caixaArredondada(ctx, 1333, 266, 219, 231, 18);
+    ctx.fillStyle = '#090A13';
+    ctx.fill();
+    ctx.strokeStyle = '#AD86DE';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    if (usuario) {
+        try {
+            const avatarUrl = usuario.displayAvatarURL({ extension: 'png', size: 256 });
+            const resposta = await fetch(avatarUrl, { signal: AbortSignal.timeout(5000) });
+            if (!resposta.ok) throw new Error(`Avatar HTTP ${resposta.status}`);
+            const avatar = await loadImage(Buffer.from(await resposta.arrayBuffer()));
+            ctx.save();
+            caixaArredondada(ctx, 1343, 276, 199, 211, 13);
+            ctx.clip();
+            ctx.drawImage(avatar, 1343, 276, 199, 211);
+            ctx.restore();
+        } catch (erro) {
+            escreverTexto(ctx, 'INOVARESALE', 1352, 391, 182, 22, '#CFA9FF');
+        }
+    } else {
+        escreverTexto(ctx, 'INOVARESALE', 1352, 391, 182, 22, '#CFA9FF');
+    }
+
+    return canvas.encode('png');
+}
+
+// Embed minimo usado junto da imagem; tambem serve de alternativa
+// quando o arquivo da imagem estiver ausente ou invalido.
+function criarEmbedVenda(dados) {
+    return new EmbedBuilder()
+        .setColor(0xA976E9)
+        .setTitle('Compra realizada — InovareSale')
+        .setDescription(
+            `Cliente: <@${dados.clienteId}>\n` +
+            `Robux: **${formatarRobux(dados.robux)}**\n` +
+            `Valor: **${formatarDinheiro(dados.valor)}**\n` +
+            `Modalidade: **${MODALIDADES[dados.modalidade] || 'Nao informada'}**\n` +
+            (dados.ticketId ? `Pedido: **INV-${String(dados.ticketId).padStart(4, '0')}**` : 'Venda concluida')
+        )
+        .setTimestamp();
+}
+
+function obterLinkCompra(guild, config) {
+    const canalId =
+        config.tickets?.painelPublicadoCanalId ||
+        config.tickets?.painelCanalId ||
+        config.estoque?.canalCompraId;
+
+    if (!canalId || !/^\d{15,22}$/.test(String(canalId))) return null;
+    const mensagemId = config.tickets?.painelMensagemId;
+    const base = `https://discord.com/channels/${guild.id}/${canalId}`;
+    return mensagemId && /^\d{15,22}$/.test(String(mensagemId))
+        ? `${base}/${mensagemId}`
+        : base;
 }
 
 async function publicarVenda(guild, dados) {
     const config = getConfig() || {};
     const canalId = config.vendas?.canalId;
     if (!canalId) {
-        return { url: null, erro: 'Canal de vendas não configurado.' };
+        return { url: null, erro: 'Canal de vendas nao configurado.' };
     }
 
     try {
         const canal = await guild.channels.fetch(canalId);
         if (!canal || canal.type !== ChannelType.GuildText) {
-            return { url: null, erro: 'Canal de vendas inválido.' };
+            return { url: null, erro: 'Canal de vendas invalido.' };
+        }
+
+        const embed = criarEmbedVenda(dados);
+        const arquivos = [];
+        try {
+            const png = await gerarImagemVenda(guild, dados);
+            arquivos.push(new AttachmentBuilder(png, { name: 'inovaresale-compra.png' }));
+            embed.setImage('attachment://inovaresale-compra.png');
+        } catch (erroImagem) {
+            // Uma falha na imagem NUNCA deve cancelar a venda salva.
+            console.error('[InovareSale] Falha ao criar imagem da venda:', erroImagem);
+        }
+
+        const componentes = [];
+        const urlCompra = obterLinkCompra(guild, config);
+        if (urlCompra) {
+            componentes.push(new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setLabel('Comprar tambem')
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(urlCompra)
+            ));
         }
 
         const mensagem = await canal.send({
-            embeds: [criarEmbedVenda(dados)],
+            embeds: [embed],
+            files: arquivos,
+            components: componentes,
             allowedMentions: { parse: [] }
         });
         return { url: mensagem.url, erro: null };
     } catch (erro) {
-        console.error('❌ Não foi possível publicar a venda:', erro);
+        console.error('[InovareSale] Nao foi possivel publicar a venda:', erro);
         return { url: null, erro: erro.message };
     }
 }
@@ -339,7 +533,8 @@ async function registrarVenda({
             usuarioRoblox,
             pagamento,
             ticketId: ticketId == null ? null : Number(ticketId),
-            totalCompras: dadosCliente.quantidadeCompras
+            totalCompras: dadosCliente.quantidadeCompras,
+            registradoEm: agora
         });
         publicacaoUrl = publicacao.url;
         erroPublicacao = publicacao.erro;
@@ -359,5 +554,7 @@ module.exports = {
     registrarVenda,
     criarEmbedVenda,
     formatarDinheiro,
-    formatarRobux
+    formatarRobux,
+    gerarImagemVenda,
+    publicarVenda
 };

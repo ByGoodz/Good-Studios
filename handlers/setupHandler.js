@@ -1,4 +1,6 @@
 
+'use strict';
+
 const {
     EmbedBuilder,
     ActionRowBuilder,
@@ -10,14 +12,10 @@ const {
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
-    AttachmentBuilder,
     ChannelType,
     PermissionFlagsBits,
     MessageFlags
 } = require('discord.js');
-
-const fs = require('fs');
-const path = require('path');
 
 const {
     getConfig,
@@ -25,37 +23,43 @@ const {
 } = require('../utils/storage');
 
 const {
-    criarPainelPrincipal
-} = require('../commands/setup');
+    criarPainelSetup
+} = require('../panels/setupPanel');
+
+const {
+    criarPainelPedidos
+} = require('../panels/pedidosPanel');
 
 // ==========================================
 // INOVARESALE BOT 2.0
-// GERENCIADOR DO PAINEL CENTRAL
+// GERENCIAMENTO DAS CONFIGURAÇÕES
 // ==========================================
 
-const METODOS = {
+const COR_PRATA = 0xC0C0C0;
+
+const MODALIDADES = {
     viaPlus: 'Via Plus',
     semTaxa: 'Robux Sem Taxa',
     taxado: 'Robux Taxado',
     viaGrupo: 'Robux Via Grupo'
 };
 
-const CARGOS = {
-    primeiraCompra: '🥉 Primeira compra',
-    cliente100: '🥈 Cliente R$100',
-    cliente300: '🥇 Cliente R$300',
-    cliente500: '💎 Cliente R$500',
-    cliente1000: '💠 Cliente R$1.000',
-    cliente5000: '💚 Cliente R$5.000',
-    cliente10000: '👑 Cliente R$10.000'
+const NIVEIS = {
+    primeiraCompra: 'Primeira compra',
+    cliente100: 'Cliente R$ 100',
+    cliente300: 'Cliente R$ 300',
+    cliente500: 'Cliente R$ 500',
+    cliente1000: 'Cliente R$ 1.000',
+    cliente5000: 'Cliente R$ 5.000',
+    cliente10000: 'Cliente R$ 10.000'
 };
 
 // ==========================================
-// CARREGAR CONFIGURAÇÃO
+// CARREGAR CONFIGURAÇÕES
 // ==========================================
 
 function carregarConfig() {
-    const config = getConfig() || {};
+    const config = getConfig();
 
     config.calculadora ??= {};
     config.estoque ??= {};
@@ -64,43 +68,16 @@ function carregarConfig() {
     config.setup ??= {};
     config.tickets ??= {};
 
-    const calc = config.calculadora;
+    config.tickets.categorias ??= {};
+    config.tickets.bloqueados ??= {};
 
-    calc.canalId ??= null;
-    calc.viaPlus ??= 42;
-
-    if (!('viaGrupo' in calc)) {
-        calc.viaGrupo = null;
-    }
-
-    calc.semTaxa ??= 39;
-    calc.taxado ??= 39;
-
-    const estoque = config.estoque;
-
-    estoque.canalId ??= null;
-    estoque.canalCompraId ??= null;
-    estoque.precoK ??= 39;
-
-    config.vendas.canalId ??= null;
-
-    const tickets = config.tickets;
-
-    tickets.cargoEquipeId ??= null;
-    tickets.painelCanalId ??= null;
-    tickets.painelMensagemId ??= null;
-
-    tickets.categorias ??= {};
-    tickets.bloqueados ??= {};
-
-    for (const metodo of Object.keys(METODOS)) {
-        tickets.categorias[metodo] ??= null;
-
-        if (!(metodo in tickets.bloqueados)) {
-            // Via Grupo começa desativado.
-            tickets.bloqueados[metodo] =
+    for (const metodo of Object.keys(MODALIDADES)) {
+        if (!(metodo in config.tickets.bloqueados)) {
+            config.tickets.bloqueados[metodo] =
                 metodo === 'viaGrupo';
         }
+
+        config.tickets.categorias[metodo] ??= null;
     }
 
     return config;
@@ -110,98 +87,91 @@ function carregarConfig() {
 // FORMATAÇÃO
 // ==========================================
 
-function formatarCanal(id) {
-    return id ? `<#${id}>` : '`Não configurado`';
+function canalTexto(id) {
+    return id ? `<#${id}>` : 'Não configurado';
 }
 
-function formatarCargo(id) {
-    return id ? `<@&${id}>` : '`Não configurado`';
+function cargoTexto(id) {
+    return id ? `<@&${id}>` : 'Não configurado';
 }
 
-function formatarK(valor) {
+function valorK(valor) {
     if (
         valor === null ||
         valor === undefined ||
         valor === false
     ) {
-        return 'OFF';
+        return 'Desativado';
     }
 
-    return `K${Number(valor).toLocaleString(
-        'pt-BR',
-        { maximumFractionDigits: 2 }
-    )}`;
+    const numero = Number(valor);
+
+    return Number.isFinite(numero) && numero > 0
+        ? `K${numero.toLocaleString('pt-BR')}`
+        : 'Desativado';
 }
 
 function criarEmbed(titulo, descricao) {
     return new EmbedBuilder()
-        .setColor(0xC0C0C0)
+        .setColor(COR_PRATA)
         .setTitle(titulo)
         .setDescription(descricao)
         .setFooter({
-            text: 'InovareSale • Configurações 2.0'
+            text: 'INOVARESALE • Configurações'
         });
 }
 
-function botaoVoltar(destino = 'setup_voltar') {
+function linhaVoltar(destino = 'setup_voltar') {
     return new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder()
                 .setCustomId(destino)
                 .setLabel('Voltar')
-                .setEmoji('⬅️')
                 .setStyle(ButtonStyle.Secondary)
         );
 }
 
 // ==========================================
-// RESPOSTAS PRIVADAS
+// RESPONDER DE FORMA PRIVADA
 // ==========================================
 
-function mensagemEhPrivada(interaction) {
-    return Boolean(
-        interaction.message?.flags?.has(
-            MessageFlags.Ephemeral
-        )
-    );
+async function responderPrivado(interaction, conteudo) {
+    const dados = typeof conteudo === 'string'
+        ? { content: conteudo }
+        : conteudo;
+
+    if (interaction.deferred) {
+        return interaction.editReply(dados);
+    }
+
+    if (interaction.replied) {
+        return interaction.followUp({
+            ...dados,
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    return interaction.reply({
+        ...dados,
+        flags: MessageFlags.Ephemeral
+    });
 }
 
 async function mostrarPainel(interaction, painel) {
-    // Se já estamos em um submenu privado,
-    // atualizamos apenas aquele submenu.
+    const mensagemPrivada =
+        interaction.message?.flags?.has(
+            MessageFlags.Ephemeral
+        );
 
-    if (mensagemEhPrivada(interaction)) {
+    if (
+        mensagemPrivada &&
+        !interaction.replied &&
+        !interaction.deferred
+    ) {
         return interaction.update(painel);
     }
 
-    // Se o clique veio do painel público,
-    // criamos uma resposta privada.
-
-    return interaction.reply({
-        ...painel,
-        flags: MessageFlags.Ephemeral
-    });
-}
-
-async function mostrarResultadoModal(
-    interaction,
-    painel
-) {
-    if (interaction.isFromMessage()) {
-        return interaction.update(painel);
-    }
-
-    return interaction.reply({
-        content: '✅ Configuração salva.',
-        flags: MessageFlags.Ephemeral
-    });
-}
-
-async function avisoPrivado(interaction, texto) {
-    return interaction.reply({
-        content: texto,
-        flags: MessageFlags.Ephemeral
-    });
+    return responderPrivado(interaction, painel);
 }
 
 // ==========================================
@@ -211,48 +181,42 @@ async function avisoPrivado(interaction, texto) {
 function painelCalculadora(config) {
     const calc = config.calculadora;
 
-    const embed = criarEmbed(
-        '🧮 Configurações da Calculadora',
+    const descricao =
+        `**Canal:** ${canalTexto(calc.canalId)}\n\n` +
+        `**Via Plus:** ${valorK(calc.viaPlus)}\n` +
+        `**Sem Taxa:** ${valorK(calc.semTaxa)}\n` +
+        `**Taxado:** ${valorK(calc.taxado)}\n` +
+        `**Via Grupo:** ${valorK(calc.viaGrupo)}\n\n` +
+        'Selecione o canal ou altere os valores K.';
 
-        `📍 **Canal:** ${formatarCanal(calc.canalId)}\n\n` +
+    const menu = new ChannelSelectMenuBuilder()
+        .setCustomId('setup_canal_calculadora')
+        .setPlaceholder('Canal da calculadora')
+        .setChannelTypes(ChannelType.GuildText);
 
-        `➕ **Via Plus:** ${formatarK(calc.viaPlus)}\n` +
-        `💸 **Sem Taxa:** ${formatarK(calc.semTaxa)}\n` +
-        `💰 **Taxado:** ${formatarK(calc.taxado)}\n` +
-        `👥 **Via Grupo:** ${formatarK(calc.viaGrupo)}\n\n` +
-
-        'Selecione o canal ou altere os valores K.'
-    );
-
-    const canal = new ActionRowBuilder()
-        .addComponents(
-            new ChannelSelectMenuBuilder()
-                .setCustomId('setup_canal_calculadora')
-                .setPlaceholder('Canal da calculadora')
-                .setChannelTypes(ChannelType.GuildText)
-                .setMinValues(1)
-                .setMaxValues(1)
-        );
-
-    const precos = new ActionRowBuilder()
-        .addComponents(
-            ...Object.entries(METODOS).map(
-                ([chave, nome]) =>
-                    new ButtonBuilder()
-                        .setCustomId(`setup_k_${chave}`)
-                        .setLabel(
-                            `${nome} • ${formatarK(calc[chave])}`
-                        )
-                        .setStyle(ButtonStyle.Secondary)
-            )
+    const botoes = Object.entries(MODALIDADES)
+        .map(([chave, nome]) =>
+            new ButtonBuilder()
+                .setCustomId(`setup_k_${chave}`)
+                .setLabel(nome)
+                .setStyle(ButtonStyle.Secondary)
         );
 
     return {
-        embeds: [embed],
+        embeds: [
+            criarEmbed(
+                'Calculadora • Configurações',
+                descricao
+            )
+        ],
         components: [
-            canal,
-            precos,
-            botaoVoltar()
+            new ActionRowBuilder()
+                .addComponents(menu),
+
+            new ActionRowBuilder()
+                .addComponents(...botoes),
+
+            linhaVoltar()
         ]
     };
 }
@@ -265,40 +229,31 @@ function painelEstoque(config) {
     const estoque = config.estoque;
 
     const embed = criarEmbed(
-        '📦 Configurações do Estoque',
+        'Estoque • Configurações',
 
-        `📍 **Canal do estoque:** ${formatarCanal(estoque.canalId)}\n\n` +
-
-        `🛒 **Canal de compra:** ${formatarCanal(estoque.canalCompraId)}\n\n` +
-
-        `💰 **Preço K:** ${formatarK(estoque.precoK)}\n\n` +
-
-        'Configure os canais e o valor exibido no estoque.'
+        `**Canal do estoque:** ${canalTexto(estoque.canalId)}\n\n` +
+        `**Canal de compras:** ${canalTexto(estoque.canalCompraId)}\n\n` +
+        `**Preço atual:** ${valorK(estoque.precoK)}\n\n` +
+        'Configure os canais e o preço do estoque.'
     );
 
-    const canalEstoque = new ActionRowBuilder()
-        .addComponents(
-            new ChannelSelectMenuBuilder()
-                .setCustomId('setup_canal_estoque')
-                .setPlaceholder('Canal do estoque')
-                .setChannelTypes(ChannelType.GuildText)
-        );
+    const canalEstoque =
+        new ChannelSelectMenuBuilder()
+            .setCustomId('setup_canal_estoque')
+            .setPlaceholder('Canal do estoque')
+            .setChannelTypes(ChannelType.GuildText);
 
-    const canalCompra = new ActionRowBuilder()
-        .addComponents(
-            new ChannelSelectMenuBuilder()
-                .setCustomId('setup_canal_compra')
-                .setPlaceholder('Canal de compra')
-                .setChannelTypes(ChannelType.GuildText)
-        );
+    const canalCompra =
+        new ChannelSelectMenuBuilder()
+            .setCustomId('setup_canal_compra')
+            .setPlaceholder('Canal de compras')
+            .setChannelTypes(ChannelType.GuildText);
 
     const botoes = new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder()
                 .setCustomId('setup_estoque_preco')
-                .setLabel(
-                    `Preço • ${formatarK(estoque.precoK)}`
-                )
+                .setLabel('Alterar preço K')
                 .setStyle(ButtonStyle.Primary),
 
             new ButtonBuilder()
@@ -310,8 +265,12 @@ function painelEstoque(config) {
     return {
         embeds: [embed],
         components: [
-            canalEstoque,
-            canalCompra,
+            new ActionRowBuilder()
+                .addComponents(canalEstoque),
+
+            new ActionRowBuilder()
+                .addComponents(canalCompra),
+
             botoes
         ]
     };
@@ -323,88 +282,90 @@ function painelEstoque(config) {
 
 function painelVendas(config) {
     const embed = criarEmbed(
-        '💰 Configurações de Vendas',
+        'Vendas • Configurações',
 
-        `📍 **Canal das vendas:** ` +
-        `${formatarCanal(config.vendas.canalId)}\n\n` +
+        `**Canal das vendas:** ` +
+        `${canalTexto(config.vendas.canalId)}\n\n` +
 
-        'As vendas concluídas serão publicadas ' +
-        'automaticamente neste canal.'
+        'As próximas compras concluídas serão ' +
+        'publicadas neste canal.'
     );
 
-    const canal = new ActionRowBuilder()
-        .addComponents(
-            new ChannelSelectMenuBuilder()
-                .setCustomId('setup_canal_vendas')
-                .setPlaceholder('Canal de vendas')
-                .setChannelTypes(ChannelType.GuildText)
-        );
-
-    return {
-        embeds: [embed],
-        components: [canal, botaoVoltar()]
-    };
-}
-
-// ==========================================
-// PAINEL DOS CARGOS
-// ==========================================
-
-function painelCargos(config) {
-    const descricao = Object.entries(CARGOS)
-        .map(
-            ([chave, nome]) =>
-                `${nome}: ${formatarCargo(config.cargos[chave])}`
-        )
-        .join('\n');
-
-    const embed = criarEmbed(
-        '🏆 Configurações dos Cargos',
-
-        `${descricao}\n\n` +
-        'Escolha um nível para configurar seu cargo.'
-    );
-
-    const menu = new StringSelectMenuBuilder()
-        .setCustomId('setup_selecionar_nivel_cargo')
-        .setPlaceholder('Selecione um nível')
-        .addOptions(
-            Object.entries(CARGOS).map(
-                ([chave, nome]) => ({
-                    label: nome,
-                    value: chave
-                })
-            )
-        );
+    const menu = new ChannelSelectMenuBuilder()
+        .setCustomId('setup_canal_vendas')
+        .setPlaceholder('Canal das vendas')
+        .setChannelTypes(ChannelType.GuildText);
 
     return {
         embeds: [embed],
         components: [
-            new ActionRowBuilder().addComponents(menu),
-            botaoVoltar()
+            new ActionRowBuilder()
+                .addComponents(menu),
+
+            linhaVoltar()
+        ]
+    };
+}
+
+// ==========================================
+// PAINEL DE CARGOS
+// ==========================================
+
+function painelCargos(config) {
+    const descricao = Object.entries(NIVEIS)
+        .map(([chave, nome]) =>
+            `**${nome}:** ${cargoTexto(config.cargos[chave])}`
+        )
+        .join('\n');
+
+    const menu = new StringSelectMenuBuilder()
+        .setCustomId('setup_selecionar_nivel_cargo')
+        .setPlaceholder('Selecione o nível do cliente')
+        .addOptions(
+            Object.entries(NIVEIS)
+                .map(([chave, nome]) => ({
+                    label: nome,
+                    value: chave
+                }))
+        );
+
+    return {
+        embeds: [
+            criarEmbed(
+                'Cargos • Configurações',
+
+                `${descricao}\n\n` +
+                'Selecione um nível para definir seu cargo.'
+            )
+        ],
+        components: [
+            new ActionRowBuilder()
+                .addComponents(menu),
+
+            linhaVoltar()
         ]
     };
 }
 
 function painelSelecionarCargo(config, nivel) {
-    const embed = criarEmbed(
-        '🏆 Selecionar Cargo',
-
-        `**Nível:** ${CARGOS[nivel]}\n\n` +
-        `**Cargo atual:** ` +
-        `${formatarCargo(config.cargos[nivel])}\n\n` +
-        'Selecione o cargo do servidor.'
-    );
-
     const menu = new RoleSelectMenuBuilder()
         .setCustomId(`setup_role_${nivel}`)
-        .setPlaceholder('Selecione o cargo');
+        .setPlaceholder('Escolha o cargo');
 
     return {
-        embeds: [embed],
+        embeds: [
+            criarEmbed(
+                'Selecionar cargo',
+
+                `**Nível:** ${NIVEIS[nivel]}\n` +
+                `**Cargo atual:** ${cargoTexto(config.cargos[nivel])}`
+            )
+        ],
         components: [
-            new ActionRowBuilder().addComponents(menu),
-            botaoVoltar('setup_cargos')
+            new ActionRowBuilder()
+                .addComponents(menu),
+
+            linhaVoltar('setup_cargos')
         ]
     };
 }
@@ -416,99 +377,76 @@ function painelSelecionarCargo(config, nivel) {
 function painelTickets(config) {
     const tickets = config.tickets;
 
-    const categorias = Object.entries(METODOS)
-        .map(
-            ([chave, nome]) =>
-                `**${nome}:** ` +
-                `${formatarCanal(tickets.categorias[chave])}`
+    const categorias = Object.entries(MODALIDADES)
+        .map(([chave, nome]) =>
+            `**${nome}:** ${canalTexto(tickets.categorias[chave])}`
         )
         .join('\n');
 
     const embed = criarEmbed(
-        '🎫 Configurações de Tickets',
+        'Tickets • Configurações',
 
-        `👥 **Equipe de atendimento:** ` +
-        `${formatarCargo(tickets.cargoEquipeId)}\n\n` +
-
-        '**Categorias dos tickets:**\n' +
+        `**Equipe:** ${cargoTexto(tickets.cargoEquipeId)}\n\n` +
+        '**Categorias dos tickets**\n' +
         `${categorias}\n\n` +
-
-        'Cada modalidade pode ter sua própria categoria.\n\n' +
-
-        'Somente o cliente, a equipe autorizada e ' +
-        'o bot terão acesso ao ticket.'
+        'Configure a equipe e a categoria ' +
+        'de cada modalidade.'
     );
 
-    const selecionarEquipe =
-        new RoleSelectMenuBuilder()
-            .setCustomId('setup_ticket_equipe')
-            .setPlaceholder(
-                'Selecione o cargo da equipe de tickets'
-            );
+    const equipe = new RoleSelectMenuBuilder()
+        .setCustomId('setup_ticket_equipe')
+        .setPlaceholder('Cargo da equipe');
 
-    const selecionarCategoria =
-        new StringSelectMenuBuilder()
-            .setCustomId('setup_ticket_escolher_categoria')
-            .setPlaceholder(
-                'Escolha a modalidade para configurar'
-            )
-            .addOptions(
-                Object.entries(METODOS).map(
-                    ([chave, nome]) => ({
-                        label: nome,
-                        value: chave
-                    })
-                )
-            );
+    const modalidades = new StringSelectMenuBuilder()
+        .setCustomId('setup_ticket_escolher_categoria')
+        .setPlaceholder('Configurar categoria')
+        .addOptions(
+            Object.entries(MODALIDADES)
+                .map(([chave, nome]) => ({
+                    label: nome,
+                    value: chave
+                }))
+        );
 
     return {
         embeds: [embed],
         components: [
             new ActionRowBuilder()
-                .addComponents(selecionarEquipe),
+                .addComponents(equipe),
 
             new ActionRowBuilder()
-                .addComponents(selecionarCategoria),
+                .addComponents(modalidades),
 
-            botaoVoltar()
+            linhaVoltar()
         ]
     };
 }
 
-// ==========================================
-// CONFIGURAR CATEGORIA ESPECÍFICA
-// ==========================================
-
 function painelCategoria(config, metodo) {
-    const categoriaAtual =
+    const atual =
         config.tickets.categorias[metodo];
-
-    const embed = criarEmbed(
-        '📁 Categoria do Ticket',
-
-        `**Modalidade:** ${METODOS[metodo]}\n\n` +
-
-        `**Categoria atual:** ` +
-        `${formatarCanal(categoriaAtual)}\n\n` +
-
-        'Escolha a categoria onde os tickets ' +
-        'dessa modalidade serão criados.'
-    );
 
     const menu = new ChannelSelectMenuBuilder()
         .setCustomId(
             `setup_ticket_categoria_${metodo}`
         )
-        .setPlaceholder('Selecione uma categoria')
-        .setChannelTypes(ChannelType.GuildCategory)
-        .setMinValues(1)
-        .setMaxValues(1);
+        .setPlaceholder('Selecione a categoria')
+        .setChannelTypes(ChannelType.GuildCategory);
 
     return {
-        embeds: [embed],
+        embeds: [
+            criarEmbed(
+                'Categoria de tickets',
+
+                `**Modalidade:** ${MODALIDADES[metodo]}\n` +
+                `**Categoria atual:** ${canalTexto(atual)}`
+            )
+        ],
         components: [
-            new ActionRowBuilder().addComponents(menu),
-            botaoVoltar('setup_tickets')
+            new ActionRowBuilder()
+                .addComponents(menu),
+
+            linhaVoltar('setup_tickets')
         ]
     };
 }
@@ -518,58 +456,42 @@ function painelCategoria(config, metodo) {
 // ==========================================
 
 function painelBloqueios(config) {
-    const bloqueados = config.tickets.bloqueados;
+    const bloqueados =
+        config.tickets.bloqueados;
 
-    const descricao = Object.entries(METODOS)
-        .map(([chave, nome]) => {
-            const status = bloqueados[chave]
-                ? '🔴 TRANCADO'
-                : '🟢 LIBERADO';
-
-            return `**${nome}:** ${status}`;
-        })
+    const descricao = Object.entries(MODALIDADES)
+        .map(([chave, nome]) =>
+            `**${nome}:** ` +
+            (bloqueados[chave] ? 'Bloqueado' : 'Liberado')
+        )
         .join('\n');
 
-    const embed = criarEmbed(
-        '🔐 Bloqueio de Modalidades',
-
-        `${descricao}\n\n` +
-
-        'Clique em uma modalidade para ' +
-        'trancar ou destrancar novas compras.\n\n' +
-
-        'Tickets já existentes não serão apagados.'
-    );
-
-    const botoes = new ActionRowBuilder()
-        .addComponents(
-            ...Object.entries(METODOS).map(
-                ([chave, nome]) => {
-                    const bloqueado =
-                        bloqueados[chave];
-
-                    return new ButtonBuilder()
-                        .setCustomId(
-                            `setup_bloqueio_${chave}`
-                        )
-                        .setLabel(nome)
-                        .setEmoji(
-                            bloqueado ? '🔒' : '🔓'
-                        )
-                        .setStyle(
-                            bloqueado
-                                ? ButtonStyle.Danger
-                                : ButtonStyle.Success
-                        );
-                }
-            )
+    const botoes = Object.entries(MODALIDADES)
+        .map(([chave, nome]) =>
+            new ButtonBuilder()
+                .setCustomId(`setup_bloqueio_${chave}`)
+                .setLabel(nome)
+                .setStyle(
+                    bloqueados[chave]
+                        ? ButtonStyle.Danger
+                        : ButtonStyle.Success
+                )
         );
 
     return {
-        embeds: [embed],
+        embeds: [
+            criarEmbed(
+                'Bloqueios de modalidades',
+
+                `${descricao}\n\n` +
+                'Clique para bloquear ou liberar novas compras.'
+            )
+        ],
         components: [
-            botoes,
-            botaoVoltar()
+            new ActionRowBuilder()
+                .addComponents(...botoes),
+
+            linhaVoltar()
         ]
     };
 }
@@ -582,28 +504,26 @@ function painelPedidos(config) {
     const tickets = config.tickets;
 
     const embed = criarEmbed(
-        '🛒 Central de Pedidos',
+        'Central de Pedidos • Configurações',
 
-        `📍 **Canal:** ` +
-        `${formatarCanal(tickets.painelCanalId)}\n\n` +
+        `**Canal escolhido:** ` +
+        `${canalTexto(tickets.painelCanalId)}\n\n` +
 
-        'Configure o canal onde ficará a ' +
-        'mensagem de abertura de compras.\n\n' +
+        'A mensagem pública utilizará o ' +
+        '**banner.png** e a **logo.png** ' +
+        'da InovareSale.\n\n' +
 
-        'O painel terá os botões:\n\n' +
+        'O painel terá dois botões:\n' +
+        '• Comprar quantia específica\n' +
+        '• Calcular valores\n\n' +
 
-        '🛒 **Comprar quantia específica**\n' +
-        '🧮 **Calcular valores**\n\n' +
-
-        'Após escolher o canal, clique em ' +
+        'Escolha o canal e clique em ' +
         '**Publicar Central**.'
     );
 
-    const canal = new ChannelSelectMenuBuilder()
+    const menu = new ChannelSelectMenuBuilder()
         .setCustomId('setup_pedidos_canal')
-        .setPlaceholder(
-            'Selecione o canal da Central de Pedidos'
-        )
+        .setPlaceholder('Canal da Central de Pedidos')
         .setChannelTypes(ChannelType.GuildText);
 
     const botoes = new ActionRowBuilder()
@@ -611,7 +531,6 @@ function painelPedidos(config) {
             new ButtonBuilder()
                 .setCustomId('setup_pedidos_publicar')
                 .setLabel('Publicar Central')
-                .setEmoji('🛒')
                 .setStyle(ButtonStyle.Success),
 
             new ButtonBuilder()
@@ -623,309 +542,214 @@ function painelPedidos(config) {
     return {
         embeds: [embed],
         components: [
-            new ActionRowBuilder().addComponents(canal),
+            new ActionRowBuilder()
+                .addComponents(menu),
+
             botoes
         ]
     };
 }
 
 // ==========================================
-// CRIAR CENTRAL DE COMPRAS PÚBLICA
+// PUBLICAR A NOVA CENTRAL COM BANNER
 // ==========================================
 
 function criarCentralPublica(config, guildId) {
-    const embed = new EmbedBuilder()
-        .setColor(0xC0C0C0)
-        .setTitle(
-            '💎 CENTRAL DE PEDIDOS — INOVARESALE'
-        )
-        .setDescription(
-            'Bem-vindo à **InovareSale**!\n\n' +
-
-            'Está procurando Robux com praticidade? ' +
-            'Você está no lugar certo!\n\n' +
-
-            '🛒 **COMPRAR QUANTIA ESPECÍFICA**\n' +
-            'Informe quantos Robux deseja comprar, ' +
-            'escolha a modalidade e abra um ticket ' +
-            'com nossa equipe.\n\n' +
-
-            '🧮 **CALCULAR VALORES**\n' +
-            'Confira os preços disponíveis antes ' +
-            'de realizar sua compra.\n\n' +
-
-            '✨ **InovareSale — Sua loja de Robux**'
-        )
-        .setFooter({
-            text: 'InovareSale • Central de Atendimento'
-        });
-
-    const arquivos = [];
-    const pastaAssets = path.join(
-        __dirname,
-        '..',
-        'assets'
-    );
-
-    for (const nome of ['logo.png', 'banner.png']) {
-        const caminho = path.join(
-            pastaAssets,
-            nome
-        );
-
-        try {
-            if (
-                !fs.statSync(caminho).isFile() ||
-                fs.statSync(caminho).size === 0
-            ) {
-                continue;
-            }
-
-            arquivos.push(
-                new AttachmentBuilder(caminho, {
-                    name: nome
-                })
-            );
-
-            if (nome === 'logo.png') {
-                embed.setThumbnail(
-                    'attachment://logo.png'
-                );
-            }
-
-            if (nome === 'banner.png') {
-                embed.setImage(
-                    'attachment://banner.png'
-                );
-            }
-
-        } catch {
-            // Imagem ausente: continua sem ela.
-        }
-    }
-
-    const comprar = new ButtonBuilder()
-        .setCustomId('ticket_abrir')
-        .setLabel('Comprar quantia específica')
-        .setEmoji('🛒')
-        .setStyle(ButtonStyle.Success);
-
-    let calcular;
-
-    if (config.calculadora?.canalId) {
-        calcular = new ButtonBuilder()
-            .setLabel('Calcular valores')
-            .setEmoji('🧮')
-            .setStyle(ButtonStyle.Link)
-            .setURL(
-                `https://discord.com/channels/` +
-                `${guildId}/${config.calculadora.canalId}`
-            );
-    } else {
-        calcular = new ButtonBuilder()
-            .setCustomId('ticket_calculadora_indisponivel')
-            .setLabel('Calcular valores')
-            .setEmoji('🧮')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(true);
-    }
-
-    return {
-        embeds: [embed],
-        components: [
-            new ActionRowBuilder()
-                .addComponents(comprar, calcular)
-        ],
-        files: arquivos,
-        allowedMentions: {
-            parse: []
-        }
-    };
+    return criarPainelPedidos(config, guildId);
 }
-
-// ==========================================
-// PUBLICAR CENTRAL DE PEDIDOS
-// ==========================================
 
 async function publicarCentral(interaction) {
     const config = carregarConfig();
 
-    if (!config.tickets.painelCanalId) {
-        return avisoPrivado(
+    const canalId =
+        config.tickets.painelCanalId;
+
+    if (!canalId) {
+        return responderPrivado(
             interaction,
-            '❌ Configure o canal da Central de Pedidos primeiro.'
+            'Configure o canal da Central de Pedidos primeiro.'
         );
     }
 
     if (!config.tickets.cargoEquipeId) {
-        return avisoPrivado(
+        return responderPrivado(
             interaction,
-            '❌ Configure o cargo da equipe de tickets primeiro.'
+            'Configure o cargo da equipe de tickets primeiro.'
         );
     }
 
+    if (
+        !interaction.deferred &&
+        !interaction.replied
+    ) {
+        await interaction.deferReply({
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
     const canal = await interaction.guild.channels.fetch(
-        config.tickets.painelCanalId
+        canalId
     );
 
     if (
         !canal ||
         canal.type !== ChannelType.GuildText
     ) {
-        return avisoPrivado(
-            interaction,
-            '❌ Canal de pedidos inválido.'
+        throw new Error(
+            'O canal da Central de Pedidos é inválido.'
         );
     }
 
-    await interaction.deferReply({
-        flags: MessageFlags.Ephemeral
-    });
-
-    const anteriorCanalId =
+    const canalAntigoId =
         config.tickets.painelPublicadoCanalId;
 
-    const anteriorMensagemId =
+    const mensagemAntigaId =
         config.tickets.painelMensagemId;
 
-    const nova = await canal.send(
+    // Usa o painel novo, com os arquivos PNG.
+    const novaMensagem = await canal.send(
         criarCentralPublica(
             config,
             interaction.guildId
         )
     );
 
-    config.tickets.painelPublicadoCanalId = canal.id;
-    config.tickets.painelMensagemId = nova.id;
+    config.tickets.painelPublicadoCanalId =
+        canal.id;
+
+    config.tickets.painelMensagemId =
+        novaMensagem.id;
 
     saveConfig(config);
 
-    let aviso = '';
-
+    // Remover a mensagem antiga, se existir.
     if (
-        anteriorCanalId &&
-        anteriorMensagemId &&
-        anteriorMensagemId !== nova.id
+        canalAntigoId &&
+        mensagemAntigaId &&
+        mensagemAntigaId !== novaMensagem.id
     ) {
         try {
             const canalAntigo =
                 await interaction.guild.channels.fetch(
-                    anteriorCanalId
+                    canalAntigoId
                 );
 
-            const antiga =
-                await canalAntigo.messages.fetch(
-                    anteriorMensagemId
-                );
+            if (canalAntigo?.messages) {
+                const mensagemAntiga =
+                    await canalAntigo.messages.fetch(
+                        mensagemAntigaId
+                    );
 
-            if (
-                antiga.author.id ===
-                interaction.client.user.id
-            ) {
-                await antiga.delete();
+                if (
+                    mensagemAntiga.author.id ===
+                    interaction.client.user.id
+                ) {
+                    await mensagemAntiga.delete();
+                }
             }
-
-        } catch {
-            aviso =
-                '\n⚠️ Não foi possível remover a central antiga.';
+        } catch (erro) {
+            console.warn(
+                '[InovareSale] Central antiga não removida:',
+                erro.message
+            );
         }
     }
 
     return interaction.editReply({
         content:
-            '✅ **Central de Pedidos publicada!**\n\n' +
-            `[Abrir mensagem](${nova.url})` +
-            aviso
+            'Central de Pedidos publicada com sucesso!\n' +
+            `[Abrir painel](${novaMensagem.url})`
     });
 }
 
 // ==========================================
-// MODAIS DE PREÇOS
+// MODAL DE PREÇOS
 // ==========================================
 
-async function mostrarModalPreco(
+function mostrarModalPreco(
     interaction,
-    customId,
+    id,
     titulo,
-    valor
+    atual
 ) {
     const modal = new ModalBuilder()
-        .setCustomId(customId)
+        .setCustomId(id)
         .setTitle(titulo);
 
-    const input = new TextInputBuilder()
+    const entrada = new TextInputBuilder()
         .setCustomId('valor_k')
-        .setLabel('Digite o valor K ou OFF')
+        .setLabel('Valor K ou OFF')
         .setPlaceholder('Exemplo: 39, 42 ou OFF')
         .setStyle(TextInputStyle.Short)
         .setRequired(true);
 
     if (
-        valor !== null &&
-        valor !== undefined
+        atual !== null &&
+        atual !== undefined
     ) {
-        input.setValue(String(valor));
+        entrada.setValue(String(atual));
     }
 
     modal.addComponents(
-        new ActionRowBuilder().addComponents(input)
+        new ActionRowBuilder()
+            .addComponents(entrada)
     );
 
     return interaction.showModal(modal);
 }
 
-function interpretarK(texto) {
-    const valor = texto.trim().toUpperCase();
+function interpretarPrecoK(texto, permitirOff) {
+    const valor = String(texto)
+        .trim()
+        .toUpperCase();
 
-    if (valor === 'OFF') {
-        return { valido: true, valor: null };
+    if (valor === 'OFF' && permitirOff) {
+        return null;
     }
 
     const numero = Number(
-        valor.replace(/^K/, '').replace(',', '.')
+        valor
+            .replace(/^K/, '')
+            .replace(',', '.')
     );
 
     if (
         !Number.isFinite(numero) ||
         numero <= 0
     ) {
-        return { valido: false };
+        throw new Error(
+            'Informe um valor K maior que zero.'
+        );
     }
 
-    return {
-        valido: true,
-        valor: numero
-    };
+    return numero;
 }
 
 // ==========================================
-// PROCESSAR INTERAÇÕES DO SETUP
+// INTERAÇÕES DO SETUP
 // ==========================================
 
 async function handleSetupInteraction(interaction) {
     const id = interaction.customId || '';
 
-    const pertenceAoSetup =
+    const ehSetup =
         id.startsWith('setup_') ||
         id.startsWith('modal_k_') ||
         id === 'modal_estoque_preco';
 
-    if (!pertenceAoSetup) {
+    if (!ehSetup) {
         return false;
     }
 
-    // ======================================
-    // PROTEÇÃO ADMINISTRATIVA
-    // ======================================
-
     if (
+        !interaction.inGuild() ||
         !interaction.memberPermissions?.has(
             PermissionFlagsBits.Administrator
         )
     ) {
-        await avisoPrivado(
+        await responderPrivado(
             interaction,
-            '❌ Apenas administradores podem utilizar este painel.'
+            'Somente administradores podem alterar as configurações.'
         );
 
         return true;
@@ -940,74 +764,54 @@ async function handleSetupInteraction(interaction) {
 
         if (interaction.isModalSubmit()) {
             if (id.startsWith('modal_k_')) {
-                const metodo = id.replace(
-                    'modal_k_', ''
+                const metodo = id.slice(
+                    'modal_k_'.length
                 );
 
-                if (!METODOS[metodo]) {
-                    await avisoPrivado(
-                        interaction,
-                        '❌ Modalidade inválida.'
+                if (!MODALIDADES[metodo]) {
+                    throw new Error(
+                        'Modalidade inválida.'
                     );
-
-                    return true;
                 }
 
-                const resultado = interpretarK(
+                const texto =
                     interaction.fields.getTextInputValue(
                         'valor_k'
-                    )
-                );
-
-                if (!resultado.valido) {
-                    await avisoPrivado(
-                        interaction,
-                        '❌ Digite um K válido ou OFF.'
                     );
 
-                    return true;
-                }
-
                 config.calculadora[metodo] =
-                    resultado.valor;
+                    interpretarPrecoK(
+                        texto,
+                        true
+                    );
 
                 saveConfig(config);
 
-                await mostrarResultadoModal(
+                await responderPrivado(
                     interaction,
-                    painelCalculadora(config)
+                    'Preço da calculadora salvo com sucesso.'
                 );
 
                 return true;
             }
 
             if (id === 'modal_estoque_preco') {
-                const resultado = interpretarK(
+                const texto =
                     interaction.fields.getTextInputValue(
                         'valor_k'
-                    )
-                );
-
-                if (
-                    !resultado.valido ||
-                    resultado.valor === null
-                ) {
-                    await avisoPrivado(
-                        interaction,
-                        '❌ O preço do estoque precisa ser maior que zero.'
                     );
 
-                    return true;
-                }
-
                 config.estoque.precoK =
-                    resultado.valor;
+                    interpretarPrecoK(
+                        texto,
+                        false
+                    );
 
                 saveConfig(config);
 
-                await mostrarResultadoModal(
+                await responderPrivado(
                     interaction,
-                    painelEstoque(config)
+                    'Preço do estoque atualizado.'
                 );
 
                 return true;
@@ -1015,11 +819,11 @@ async function handleSetupInteraction(interaction) {
         }
 
         // ==================================
-        // SELETORES DE CANAL
+        // SELEÇÃO DE CANAIS
         // ==================================
 
         if (interaction.isChannelSelectMenu()) {
-            const canalId = interaction.values[0];
+            const escolhido = interaction.values[0];
 
             const campos = {
                 setup_canal_calculadora:
@@ -1039,43 +843,60 @@ async function handleSetupInteraction(interaction) {
             };
 
             if (campos[id]) {
-                const [secao, chave] = campos[id];
+                const [secao, campo] =
+                    campos[id];
 
-                config[secao][chave] = canalId;
+                config[secao][campo] =
+                    escolhido;
+
                 saveConfig(config);
 
-                const painel =
-                    secao === 'calculadora'
-                        ? painelCalculadora(config)
-                        : secao === 'estoque'
-                            ? painelEstoque(config)
-                            : secao === 'vendas'
-                                ? painelVendas(config)
-                                : painelPedidos(config);
+                const paineis = {
+                    calculadora: painelCalculadora,
+                    estoque: painelEstoque,
+                    vendas: painelVendas,
+                    tickets: painelPedidos
+                };
 
                 await mostrarPainel(
                     interaction,
-                    painel
+                    paineis[secao](config)
                 );
 
                 return true;
             }
 
-            if (
-                id.startsWith(
-                    'setup_ticket_categoria_'
-                )
-            ) {
-                const metodo = id.replace(
-                    'setup_ticket_categoria_', ''
+            const prefixo =
+                'setup_ticket_categoria_';
+
+            if (id.startsWith(prefixo)) {
+                const metodo = id.slice(
+                    prefixo.length
                 );
 
-                if (!METODOS[metodo]) {
-                    return false;
+                if (!MODALIDADES[metodo]) {
+                    throw new Error(
+                        'Modalidade inválida.'
+                    );
+                }
+
+                const categoria =
+                    await interaction.guild.channels.fetch(
+                        escolhido
+                    );
+
+                if (
+                    !categoria ||
+                    categoria.type !==
+                    ChannelType.GuildCategory
+                ) {
+                    throw new Error(
+                        'Selecione uma categoria válida.'
+                    );
                 }
 
                 config.tickets.categorias[metodo] =
-                    canalId;
+                    escolhido;
 
                 saveConfig(config);
 
@@ -1089,13 +910,16 @@ async function handleSetupInteraction(interaction) {
         }
 
         // ==================================
-        // SELETORES DE CARGO
+        // SELEÇÃO DE CARGOS
         // ==================================
 
         if (interaction.isRoleSelectMenu()) {
+            const cargoId =
+                interaction.values[0];
+
             if (id === 'setup_ticket_equipe') {
                 config.tickets.cargoEquipeId =
-                    interaction.values[0];
+                    cargoId;
 
                 saveConfig(config);
 
@@ -1108,16 +932,18 @@ async function handleSetupInteraction(interaction) {
             }
 
             if (id.startsWith('setup_role_')) {
-                const nivel = id.replace(
-                    'setup_role_', ''
+                const nivel = id.slice(
+                    'setup_role_'.length
                 );
 
-                if (!CARGOS[nivel]) {
-                    return false;
+                if (!NIVEIS[nivel]) {
+                    throw new Error(
+                        'Nível de cliente inválido.'
+                    );
                 }
 
                 config.cargos[nivel] =
-                    interaction.values[0];
+                    cargoId;
 
                 saveConfig(config);
 
@@ -1142,8 +968,10 @@ async function handleSetupInteraction(interaction) {
                 const nivel =
                     interaction.values[0];
 
-                if (!CARGOS[nivel]) {
-                    return false;
+                if (!NIVEIS[nivel]) {
+                    throw new Error(
+                        'Nível inválido.'
+                    );
                 }
 
                 await mostrarPainel(
@@ -1164,8 +992,10 @@ async function handleSetupInteraction(interaction) {
                 const metodo =
                     interaction.values[0];
 
-                if (!METODOS[metodo]) {
-                    return false;
+                if (!MODALIDADES[metodo]) {
+                    throw new Error(
+                        'Modalidade inválida.'
+                    );
                 }
 
                 await mostrarPainel(
@@ -1189,32 +1019,19 @@ async function handleSetupInteraction(interaction) {
         }
 
         const paineis = {
-            setup_calculadora:
-                painelCalculadora,
-
-            setup_estoque:
-                painelEstoque,
-
-            setup_vendas:
-                painelVendas,
-
-            setup_cargos:
-                painelCargos,
-
-            setup_tickets:
-                painelTickets,
-
-            setup_bloqueios:
-                painelBloqueios,
-
-            setup_pedidos:
-                painelPedidos
+            setup_calculadora: painelCalculadora,
+            setup_estoque: painelEstoque,
+            setup_vendas: painelVendas,
+            setup_cargos: painelCargos,
+            setup_tickets: painelTickets,
+            setup_bloqueios: painelBloqueios,
+            setup_pedidos: painelPedidos
         };
 
         if (id === 'setup_voltar') {
             await mostrarPainel(
                 interaction,
-                criarPainelPrincipal()
+                criarPainelSetup(config)
             );
 
             return true;
@@ -1229,19 +1046,15 @@ async function handleSetupInteraction(interaction) {
             return true;
         }
 
-        // ==================================
-        // TRANCAR / DESTRANCAR
-        // ==================================
-
-        if (
-            id.startsWith('setup_bloqueio_')
-        ) {
-            const metodo = id.replace(
-                'setup_bloqueio_', ''
+        if (id.startsWith('setup_bloqueio_')) {
+            const metodo = id.slice(
+                'setup_bloqueio_'.length
             );
 
-            if (!METODOS[metodo]) {
-                return false;
+            if (!MODALIDADES[metodo]) {
+                throw new Error(
+                    'Modalidade inválida.'
+                );
             }
 
             config.tickets.bloqueados[metodo] =
@@ -1257,50 +1070,41 @@ async function handleSetupInteraction(interaction) {
             return true;
         }
 
-        // ==================================
-        // ALTERAR VALOR K
-        // ==================================
-
         if (id.startsWith('setup_k_')) {
-            const metodo = id.replace(
-                'setup_k_', ''
+            const metodo = id.slice(
+                'setup_k_'.length
             );
 
-            if (!METODOS[metodo]) {
-                return false;
+            if (!MODALIDADES[metodo]) {
+                throw new Error(
+                    'Modalidade inválida.'
+                );
             }
 
             await mostrarModalPreco(
                 interaction,
                 `modal_k_${metodo}`,
-                `Configurar ${METODOS[metodo]}`,
+                `Preço: ${MODALIDADES[metodo]}`,
                 config.calculadora[metodo]
             );
 
             return true;
         }
 
-        // ==================================
-        // ALTERAR PREÇO DO ESTOQUE
-        // ==================================
-
         if (id === 'setup_estoque_preco') {
             await mostrarModalPreco(
                 interaction,
                 'modal_estoque_preco',
-                'Preço do Estoque',
+                'Preço do estoque',
                 config.estoque.precoK
             );
 
             return true;
         }
 
-        // ==================================
-        // PUBLICAR CENTRAL DE PEDIDOS
-        // ==================================
-
         if (id === 'setup_pedidos_publicar') {
             await publicarCentral(interaction);
+
             return true;
         }
 
@@ -1308,34 +1112,28 @@ async function handleSetupInteraction(interaction) {
 
     } catch (erro) {
         console.error(
-            '❌ Erro no Setup Handler:',
+            '[InovareSale] Erro no setup:',
             erro
         );
 
         try {
-            if (
-                interaction.replied ||
-                interaction.deferred
-            ) {
-                await interaction.followUp({
-                    content:
-                        '❌ Ocorreu um erro nas configurações. Verifique os logs.',
-                    flags: MessageFlags.Ephemeral
-                });
-            } else {
-                await avisoPrivado(
-                    interaction,
-                    '❌ Ocorreu um erro nas configurações. Verifique os logs.'
-                );
-            }
-        } catch {}
+            await responderPrivado(
+                interaction,
+                `Não foi possível concluir a ação: ${erro.message}`
+            );
+        } catch (erroResposta) {
+            console.error(
+                '[InovareSale] Erro ao responder:',
+                erroResposta
+            );
+        }
 
         return true;
     }
 }
 
 // ==========================================
-// EXPORTAR FUNÇÕES
+// EXPORTAÇÕES
 // ==========================================
 
 module.exports = {
