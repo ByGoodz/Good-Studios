@@ -1,18 +1,25 @@
 {
   "name": "inovaresale-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "start": "node database/migrate.js && node index.js",
+    "deploy": "node deploy-commands.js",
+    "migrate": "node database/migrate.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.10",
+    "better-sqlite3": "^13.0.3",
     "discord.js": "^14.27.0",
     "dotenv": "^18.0.6"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true
   }
 }

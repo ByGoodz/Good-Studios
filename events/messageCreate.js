@@ -1,646 +1,258 @@
+
+'use strict';
+
 const {
     Events,
-    EmbedBuilder
+    AttachmentBuilder
 } = require('discord.js');
 
-const {
-    getConfig
-} = require('../utils/storage');
+const { getConfig } = require('../utils/storage');
 
 const {
-    calcularPreco,
-    calcularSemTaxa,
-    calcularTaxado,
-    calcularPorReais,
-    formatarDinheiro,
-    formatarRobux
-} = require('../utils/calculator');
+    interpretarQuantidadeRobux,
+    interpretarValorReais
+} = require('../utils/validators');
 
+const {
+    gerarImagemPorRobux,
+    gerarImagemPorReais
+} = require('../services/imagemService');
 
 // ==========================================
-// INTERPRETAR QUANTIDADE DE ROBUX
+// INOVARESALE BOT 2.0
+// CALCULADORA AUTOMATICA POR IMAGEM
+// ==========================================
+// Exemplos aceitos no canal configurado:
+//   5000       -> 5.000 Robux
+//   5.000      -> 5.000 Robux
+//   5k         -> 5.000 Robux
+//   5,5k       -> 5.500 Robux
+//   5000 robux -> 5.000 Robux
+//   R$ 100     -> orcamento de R$ 100,00
+//   R$ 39,50   -> orcamento de R$ 39,50
+//   100 reais  -> orcamento de R$ 100,00
 // ==========================================
 
-function interpretarRobux(texto) {
+const COOLDOWN_MS = 3000;
+const usuariosEmProcessamento = new Set();
+const ultimaConsulta = new Map();
+let ultimaLimpeza = 0;
 
-    let valor = texto
-        .trim()
-        .toLowerCase()
-        .replace(/\s/g, '');
+// ==========================================
+// RECONHECER SE O TEXTO E UM CALCULO
+// ==========================================
 
-    // Exemplo: 5k ou 2,5k
-    if (valor.endsWith('k')) {
+function interpretarMensagemCalculadora(conteudo) {
+    const texto = String(conteudo ?? '').trim();
 
-        valor = valor
-            .slice(0, -1)
-            .replace(',', '.');
+    if (!texto || texto.length > 80 || texto.includes('\n')) {
+        return null;
+    }
 
-        const numero = Number(valor);
+    // Entradas com R$ ou palavras como "reais" sao orcamentos.
+    const comCifrao = texto.match(/^R\$\s*(.+)$/i);
 
-        if (
-            !Number.isFinite(numero) ||
-            numero <= 0
-        ) {
-            return null;
+    if (comCifrao) {
+        return {
+            tipo: 'reais',
+            valor: interpretarValorReais(comCifrao[1])
+        };
+    }
+
+    const comReais = texto.match(
+        /^(\d[\d.,\s]*)\s*(?:reais?|brl)$/i
+    );
+
+    if (comReais) {
+        return {
+            tipo: 'reais',
+            valor: interpretarValorReais(comReais[1])
+        };
+    }
+
+    // Numero ou numero com K (com "robux" opcional).
+    let quantidadeTexto = texto;
+
+    if (/\s*robux$/i.test(quantidadeTexto)) {
+        quantidadeTexto = quantidadeTexto.replace(/\s*robux$/i, '').trim();
+    }
+
+    const formatoInteiro =
+        /^(?:\d+|\d{1,3}(?:\.\d{3})+)$/;
+
+    const formatoK = /^\d+(?:[.,]\d{1,3})?\s*k$/i;
+
+    if (!formatoInteiro.test(quantidadeTexto) &&
+        !formatoK.test(quantidadeTexto)) {
+        return null;
+    }
+
+    return {
+        tipo: 'robux',
+        valor: interpretarQuantidadeRobux(
+            quantidadeTexto.replace(/\s+(?=k$)/i, '')
+        )
+    };
+}
+
+// ==========================================
+// EVITAR VARIAS IMAGENS AO MESMO TEMPO
+// ==========================================
+
+function limparConsultasAntigas() {
+    const agora = Date.now();
+
+    if (agora - ultimaLimpeza < 60000) {
+        return;
+    }
+
+    ultimaLimpeza = agora;
+
+    for (const [chave, data] of ultimaConsulta) {
+        if (agora - data > 60000) {
+            ultimaConsulta.delete(chave);
         }
-
-        return Math.floor(numero * 1000);
     }
-
-
-    // Aceita somente números, pontos e vírgulas
-    if (!/^[\d.,]+$/.test(valor)) {
-        return null;
-    }
-
-
-    // Exemplo:
-    // 5000
-    // 5.000
-    // 10000
-    valor = valor
-        .replace(/\./g, '')
-        .replace(',', '.');
-
-
-    const numero = Number(valor);
-
-
-    if (
-        !Number.isFinite(numero) ||
-        numero <= 0
-    ) {
-        return null;
-    }
-
-
-    return Math.floor(numero);
 }
 
+function permitirConsulta(chave) {
+    limparConsultasAntigas();
 
-// ==========================================
-// INTERPRETAR VALOR EM REAIS
-// ==========================================
-
-function interpretarReais(texto) {
-
-    const original = texto
-        .trim()
-        .toLowerCase();
-
-
-    let valor = null;
-
-
-    // R$ 100
-    // R$100
-    if (original.startsWith('r$')) {
-
-        valor = original
-            .replace('r$', '')
-            .trim();
+    if (usuariosEmProcessamento.has(chave)) {
+        return false;
     }
 
+    const agora = Date.now();
+    const ultima = ultimaConsulta.get(chave) || 0;
 
-    // 100 reais
-    else if (original.endsWith('reais')) {
-
-        valor = original
-            .replace('reais', '')
-            .trim();
+    if (agora - ultima < COOLDOWN_MS) {
+        return false;
     }
 
+    ultimaConsulta.set(chave, agora);
+    usuariosEmProcessamento.add(chave);
 
-    // 100 rs
-    else if (original.endsWith('rs')) {
-
-        valor = original
-            .slice(0, -2)
-            .trim();
-    }
-
-
-    else {
-
-        return null;
-    }
-
-
-    valor = valor
-        .replace(/\s/g, '')
-        .replace(/\./g, '')
-        .replace(',', '.');
-
-
-    const numero = Number(valor);
-
-
-    if (
-        !Number.isFinite(numero) ||
-        numero <= 0
-    ) {
-        return null;
-    }
-
-
-    return numero;
+    return true;
 }
 
-
 // ==========================================
-// VERIFICAR SE MÉTODO ESTÁ ATIVO
+// RESPONDER SEM MENCIONAR O USUARIO
 // ==========================================
 
-function metodoAtivo(valor) {
-
-    return (
-        valor !== null &&
-        valor !== undefined &&
-        valor !== false &&
-        Number(valor) > 0
-    );
+async function responderMensagem(mensagem, dados) {
+    return mensagem.reply({
+        ...dados,
+        allowedMentions: {
+            parse: [],
+            repliedUser: false
+        }
+    });
 }
 
-
 // ==========================================
-// CALCULAR ROBUX DIRETO PELO K
-// ==========================================
-
-function robuxPorReais(valorReais, k) {
-
-    return Math.floor(
-        (valorReais / Number(k)) * 1000
-    );
-}
-
-
-// ==========================================
-// CALCULAR POR QUANTIDADE DE ROBUX
+// GERAR E ENVIAR A IMAGEM
 // ==========================================
 
-function criarEmbedPorRobux(
-    robux,
-    config
-) {
+async function processarCalculadora(mensagem, config, entrada) {
+    const imagem = entrada.tipo === 'robux'
+        ? await gerarImagemPorRobux(entrada.valor, config)
+        : await gerarImagemPorReais(entrada.valor, config);
 
-    const calc =
-        config.calculadora;
-
-
-    const embed =
-        new EmbedBuilder()
-
-            .setColor(0xC0C0C0)
-
-            .setAuthor({
-                name:
-                    'InovareSale • Calculadora de Robux'
-            })
-
-            .setTitle(
-                `💎 Preço estimado para ${formatarRobux(robux)} Robux`
-            )
-
-            .setDescription(
-                'Confira abaixo as modalidades disponíveis para sua compra.'
-            );
-
-
-    // ======================================
-    // VIA PLUS
-    // ======================================
-
-    if (
-        metodoAtivo(
-            calc.viaPlus
-        )
-    ) {
-
-        const preco =
-            calcularPreco(
-                robux,
-                calc.viaPlus
-            );
-
-
-        embed.addFields({
-
-            name:
-                `➕ Via Plus • K${calc.viaPlus}`,
-
-            value:
-                `**${formatarDinheiro(preco)}**\n` +
-                `${formatarRobux(robux)} Robux`,
-
-            inline:
-                false
-        });
+    if (!imagem || imagem.length === 0) {
+        throw new Error('A imagem da calculadora ficou vazia.');
     }
 
-
-    // ======================================
-    // VIA GRUPO
-    // ======================================
-
-    if (
-        metodoAtivo(
-            calc.viaGrupo
-        )
-    ) {
-
-        const preco =
-            calcularPreco(
-                robux,
-                calc.viaGrupo
-            );
-
-
-        embed.addFields({
-
-            name:
-                `👥 Via Grupo • K${calc.viaGrupo}`,
-
-            value:
-                `**${formatarDinheiro(preco)}**\n` +
-                `${formatarRobux(robux)} Robux`,
-
-            inline:
-                false
-        });
-    }
-
-
-    // ======================================
-    // SEM TAXA
-    // ======================================
-
-    if (
-        metodoAtivo(
-            calc.semTaxa
-        )
-    ) {
-
-        const resultado =
-            calcularSemTaxa(
-                robux,
-                calc.semTaxa
-            );
-
-
-        embed.addFields({
-
-            name:
-                `💸 Robux Sem Taxa • K${calc.semTaxa}`,
-
-            value:
-                `**${formatarDinheiro(resultado.preco)}**\n` +
-                `Você recebe **${formatarRobux(resultado.robuxRecebido)} Robux**\n` +
-                `Gamepass de **${formatarRobux(resultado.robuxGamepass)} Robux**`,
-
-            inline:
-                false
-        });
-    }
-
-
-    // ======================================
-    // TAXADO
-    // ======================================
-
-    if (
-        metodoAtivo(
-            calc.taxado
-        )
-    ) {
-
-        const resultado =
-            calcularTaxado(
-                robux,
-                calc.taxado
-            );
-
-
-        embed.addFields({
-
-            name:
-                `💰 Robux Taxado • K${calc.taxado}`,
-
-            value:
-                `**${formatarDinheiro(resultado.preco)}**\n` +
-                `Você recebe **${formatarRobux(resultado.robuxRecebido)} Robux**\n` +
-                `Gamepass de **${formatarRobux(resultado.robuxGamepass)} Robux**`,
-
-            inline:
-                false
-        });
-    }
-
-
-    embed.setFooter({
-        text:
-            'InovareSale • Valores calculados automaticamente'
+    const arquivo = new AttachmentBuilder(imagem, {
+        name: 'inovaresale-calculadora.png',
+        description: 'Tabela de precos da InovareSale'
     });
 
-
-    return embed;
-}
-
-
-// ==========================================
-// CALCULAR A PARTIR DE REAIS
-// ==========================================
-
-function criarEmbedPorReais(
-    valor,
-    config
-) {
-
-    const calc =
-        config.calculadora;
-
-
-    const embed =
-        new EmbedBuilder()
-
-            .setColor(0xC0C0C0)
-
-            .setAuthor({
-                name:
-                    'InovareSale • Calculadora de Robux'
-            })
-
-            .setTitle(
-                `💵 O que você consegue com ${formatarDinheiro(valor)}`
-            )
-
-            .setDescription(
-                'Confira abaixo a quantidade estimada em cada modalidade.'
-            );
-
-
-    // ======================================
-    // VIA PLUS
-    // ======================================
-
-    if (
-        metodoAtivo(
-            calc.viaPlus
-        )
-    ) {
-
-        const quantidade =
-            robuxPorReais(
-                valor,
-                calc.viaPlus
-            );
-
-
-        embed.addFields({
-
-            name:
-                `➕ Via Plus • K${calc.viaPlus}`,
-
-            value:
-                `Você consegue **${formatarRobux(quantidade)} Robux**`,
-
-            inline:
-                false
-        });
-    }
-
-
-    // ======================================
-    // VIA GRUPO
-    // ======================================
-
-    if (
-        metodoAtivo(
-            calc.viaGrupo
-        )
-    ) {
-
-        const quantidade =
-            robuxPorReais(
-                valor,
-                calc.viaGrupo
-            );
-
-
-        embed.addFields({
-
-            name:
-                `👥 Via Grupo • K${calc.viaGrupo}`,
-
-            value:
-                `Você consegue **${formatarRobux(quantidade)} Robux**`,
-
-            inline:
-                false
-        });
-    }
-
-
-    // ======================================
-    // SEM TAXA
-    // ======================================
-
-    if (
-        metodoAtivo(
-            calc.semTaxa
-        )
-    ) {
-
-        const resultado =
-            calcularPorReais(
-                valor,
-                calc.semTaxa
-            );
-
-
-        embed.addFields({
-
-            name:
-                `💸 Robux Sem Taxa • K${calc.semTaxa}`,
-
-            value:
-                `Você recebe **${formatarRobux(resultado.robuxRecebido)} Robux**\n` +
-                `Gamepass de **${formatarRobux(resultado.robuxGamepass)} Robux**`,
-
-            inline:
-                false
-        });
-    }
-
-
-    // ======================================
-    // TAXADO
-    // ======================================
-
-    if (
-        metodoAtivo(
-            calc.taxado
-        )
-    ) {
-
-        const resultado =
-            calcularPorReais(
-                valor,
-                calc.taxado
-            );
-
-
-        embed.addFields({
-
-            name:
-                `💰 Robux Taxado • K${calc.taxado}`,
-
-            value:
-                `Você consegue receber **${formatarRobux(resultado.robuxRecebido)} Robux**\n` +
-                `Gamepass de **${formatarRobux(resultado.robuxGamepass)} Robux**`,
-
-            inline:
-                false
-        });
-    }
-
-
-    embed.setFooter({
-        text:
-            'InovareSale • Valores calculados automaticamente'
+    await responderMensagem(mensagem, {
+        files: [arquivo]
     });
-
-
-    return embed;
 }
 
-
 // ==========================================
-// EVENTO DE MENSAGEM
+// EVENTO DE MENSAGENS
 // ==========================================
 
 module.exports = {
+    name: Events.MessageCreate,
 
-    name:
-        Events.MessageCreate,
-
-
-    async execute(message) {
-
-        // Ignorar mensagens de bots
-        if (message.author.bot) {
-            return;
-        }
-
-
-        // Ignorar mensagens fora de servidores
-        if (!message.guild) {
-            return;
-        }
-
-
-        const config =
-            getConfig();
-
-
-        // Calculadora ainda não configurada
+    async execute(mensagem) {
         if (
-            !config.calculadora?.canalId
+            !mensagem?.guild ||
+            !mensagem.author ||
+            mensagem.author.bot ||
+            mensagem.webhookId
         ) {
             return;
         }
 
+        let config;
 
-        // Só funciona no canal escolhido no /setup
-        if (
-            message.channel.id !==
-            config.calculadora.canalId
-        ) {
+        try {
+            config = getConfig();
+        } catch (erro) {
+            console.error(
+                '[InovareSale] Falha ao carregar configuracao da calculadora:',
+                erro
+            );
             return;
         }
 
+        const canalCalculadora = config?.calculadora?.canalId;
 
-        const texto =
-            message.content.trim();
-
-
-        // ==================================
-        // TENTAR VALOR EM REAIS
-        // ==================================
-
-        const valorReais =
-            interpretarReais(texto);
-
-
-        if (valorReais !== null) {
-
-            const embed =
-                criarEmbedPorReais(
-                    valorReais,
-                    config
-                );
-
-
-            await message.reply({
-
-                embeds: [embed],
-
-                allowedMentions: {
-                    repliedUser: true
-                }
-            });
-
-
+        // Nunca interferir em conversas de outros canais.
+        if (!canalCalculadora || mensagem.channelId !== canalCalculadora) {
             return;
         }
 
+        let entrada;
 
-        // ==================================
-        // TENTAR QUANTIDADE DE ROBUX
-        // ==================================
-
-        const robux =
-            interpretarRobux(texto);
-
-
-        if (robux !== null) {
-
-            const embed =
-                criarEmbedPorRobux(
-                    robux,
-                    config
-                );
-
-
-            await message.reply({
-
-                embeds: [embed],
-
-                allowedMentions: {
-                    repliedUser: true
-                }
-            });
-
-
+        try {
+            entrada = interpretarMensagemCalculadora(mensagem.content);
+        } catch (erro) {
+            await responderMensagem(mensagem, {
+                content: `❌ ${erro.message}\n\n` +
+                    'Exemplos: `5000`, `5k`, `5,5k`, `R$ 100`.'
+            }).catch(console.error);
             return;
         }
 
+        // Mensagens normais, links e comandos nao geram imagens.
+        if (!entrada) {
+            return;
+        }
 
-        // ==================================
-        // FORMATO INVÁLIDO
-        // ==================================
+        const chave = `${mensagem.guildId}:${mensagem.author.id}`;
 
-        await message.reply({
+        if (!permitirConsulta(chave)) {
+            return;
+        }
 
-            content:
-                '❌ **Formato inválido.**\n\n' +
-                'Para calcular Robux, envie somente a quantidade:\n' +
-                '`5000`\n\n' +
-                'Para calcular por dinheiro, envie:\n' +
-                '`R$ 100`',
-
-            allowedMentions: {
-                repliedUser: true
+        try {
+            // Indica que o bot esta gerando a imagem.
+            if (typeof mensagem.channel.sendTyping === 'function') {
+                await mensagem.channel.sendTyping().catch(() => {});
             }
-        });
+
+            await processarCalculadora(mensagem, config, entrada);
+
+        } catch (erro) {
+            console.error(
+                '[InovareSale] Erro ao gerar imagem da calculadora:',
+                erro
+            );
+
+            await responderMensagem(mensagem, {
+                content:
+                    '❌ Não consegui gerar a imagem agora. ' +
+                    'Avise a equipe se o problema continuar.'
+            }).catch(console.error);
+
+        } finally {
+            usuariosEmProcessamento.delete(chave);
+        }
     }
 };

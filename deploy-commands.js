@@ -1,84 +1,168 @@
+
+'use strict';
+
+// ==========================================
+// INOVARESALE BOT 2.0
+// REGISTRO AUTOMATICO DOS COMANDOS
+// ==========================================
+
 require('dotenv').config();
+
+const fs = require('fs');
+const path = require('path');
 
 const {
     REST,
-    Routes,
-    SlashCommandBuilder,
-    PermissionFlagsBits
+    Routes
 } = require('discord.js');
 
-const token = process.env.DISCORD_TOKEN;
+// ==========================================
+// CONFIGURACOES
+// ==========================================
 
-// ID da aplicação/bot
-const CLIENT_ID = '1557429851231887511';
+const TOKEN = process.env.DISCORD_TOKEN;
 
-const commands = [
-    new SlashCommandBuilder()
-        .setName('setup')
-        .setDescription('Abre o painel de configuração da InovareSale.')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+const PASTA_COMANDOS = path.join(
+    __dirname,
+    'commands'
+);
 
-    new SlashCommandBuilder()
-        .setName('estoque')
-        .setDescription('Atualiza o estoque da InovareSale.')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+// ==========================================
+// CARREGAR COMANDOS
+// ==========================================
 
-    new SlashCommandBuilder()
-        .setName('venda')
-        .setDescription('Registra uma venda da InovareSale.')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .addUserOption(option =>
-            option
-                .setName('cliente')
-                .setDescription('Cliente que realizou a compra')
-                .setRequired(true)
-        )
-        .addNumberOption(option =>
-            option
-                .setName('valor')
-                .setDescription('Valor pago em reais')
-                .setRequired(true)
-        )
-        .addIntegerOption(option =>
-            option
-                .setName('robux')
-                .setDescription('Quantidade de Robux da venda')
-                .setRequired(true)
-        )
-].map(command => command.toJSON());
+function carregarComandos() {
+    if (!fs.existsSync(PASTA_COMANDOS)) {
+        throw new Error(
+            'A pasta commands não foi encontrada.'
+        );
+    }
 
-const rest = new REST({ version: '10' }).setToken(token);
+    const arquivos = fs.readdirSync(
+        PASTA_COMANDOS
+    ).filter(
+        arquivo => arquivo.endsWith('.js')
+    );
 
-async function registrar() {
-    try {
-        console.log('Registrando comandos globais...');
+    const comandos = [];
+    const nomes = new Set();
 
-        const resultado = await rest.put(
-            Routes.applicationCommands(CLIENT_ID),
-            { body: commands }
+    for (const arquivo of arquivos) {
+        const caminho = path.join(
+            PASTA_COMANDOS,
+            arquivo
         );
 
-        console.log(`SUCESSO: ${resultado.length} comandos registrados.`);
+        const comando = require(caminho);
 
-        for (const comando of resultado) {
-            console.log(`/${comando.name}`);
+        if (
+            !comando.data ||
+            typeof comando.data.toJSON !== 'function'
+        ) {
+            throw new Error(
+                `O arquivo ${arquivo} não possui um comando válido em "data".`
+            );
         }
 
-        console.log('Conferindo diretamente na API...');
+        const dados = comando.data.toJSON();
 
-        const conferir = await rest.get(
-            Routes.applicationCommands(CLIENT_ID)
-        );
+        if (!dados.name) {
+            throw new Error(
+                `O comando em ${arquivo} não possui nome.`
+            );
+        }
+
+        if (nomes.has(dados.name)) {
+            throw new Error(
+                `Comando duplicado: /${dados.name}`
+            );
+        }
+
+        nomes.add(dados.name);
+        comandos.push(dados);
 
         console.log(
-            'COMANDOS NA API:',
-            conferir.map(c => `/${c.name}`)
+            `✅ Comando encontrado: /${dados.name}`
         );
-
-    } catch (erro) {
-        console.error('ERRO REAL DO DISCORD:');
-        console.error(erro);
     }
+
+    if (comandos.length === 0) {
+        throw new Error(
+            'Nenhum comando foi encontrado.'
+        );
+    }
+
+    return comandos;
 }
 
-registrar();
+// ==========================================
+// REGISTRAR COMANDOS NO DISCORD
+// ==========================================
+
+async function registrarComandos() {
+    if (!TOKEN) {
+        throw new Error(
+            'DISCORD_TOKEN não foi encontrado no .env.'
+        );
+    }
+
+    const comandos = carregarComandos();
+
+    const rest = new REST({
+        version: '10'
+    }).setToken(TOKEN);
+
+    // Buscar o ID da aplicação pelo próprio token.
+    const aplicacao = await rest.get(
+        Routes.oauth2CurrentApplication()
+    );
+
+    const clientId = aplicacao.id;
+
+    if (!clientId) {
+        throw new Error(
+            'Não foi possível identificar a aplicação do bot.'
+        );
+    }
+
+    console.log('');
+    console.log(
+        '🚀 Registrando comandos da InovareSale...'
+    );
+
+    const registrados = await rest.put(
+        Routes.applicationCommands(clientId),
+        {
+            body: comandos
+        }
+    );
+
+    console.log('');
+    console.log(
+        `✅ ${registrados.length} comandos registrados com sucesso!`
+    );
+
+    for (const comando of registrados) {
+        console.log(
+            `💎 /${comando.name}`
+        );
+    }
+
+    console.log('');
+    console.log(
+        '🎉 InovareSale Bot 2.0 — Comandos atualizados!'
+    );
+}
+
+// ==========================================
+// EXECUTAR
+// ==========================================
+
+registrarComandos().catch(erro => {
+    console.error(
+        '❌ Erro ao registrar comandos:',
+        erro
+    );
+
+    process.exitCode = 1;
+});

@@ -1,2 +1,63 @@
+
+# ==========================================
+# INOVARESALE BOT 2.0
+# ARQUIVOS IGNORADOS PELO GIT
+# ==========================================
+
+# Dependencias do Node.js
 node_modules/
+
+# Tokens e variaveis privadas
 .env
+.env.*
+!.env.example
+
+# Bancos de dados SQLite
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Armazenamento local do bot
+database/storage/
+
+# Backups locais
+data/backups/
+backups/
+
+# Arquivos temporarios
+tmp/
+temp/
+.cache/
+*.tmp
+*.bak
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Arquivos do editor
+.vscode/*.log
+.idea/
+
+# Relatorios de testes
+coverage/
+.nyc_output/
+
+# Arquivos compactados temporarios
+*.zip
+*.rar
+*.7z

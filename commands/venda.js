@@ -1,41 +1,51 @@
+
 const {
     SlashCommandBuilder,
     PermissionFlagsBits,
-    EmbedBuilder,
     MessageFlags
 } = require('discord.js');
 
 const {
-    getConfig,
-    getSales,
-    saveSales
-} = require('../utils/storage');
-
-const {
-    atualizarCargo
-} = require('../utils/roles');
-
+    registrarVenda
+} = require('../services/vendaService');
 
 // ==========================================
-// FORMATAR DINHEIRO
+// FORMATAÇÃO
 // ==========================================
 
 function formatarDinheiro(valor) {
-    return Number(valor).toLocaleString('pt-BR', {
-        style: 'currency',
-        currency: 'BRL'
-    });
+    return Number(valor || 0).toLocaleString(
+        'pt-BR',
+        {
+            style: 'currency',
+            currency: 'BRL'
+        }
+    );
 }
-
-
-// ==========================================
-// FORMATAR ROBUX
-// ==========================================
 
 function formatarRobux(valor) {
-    return Number(valor).toLocaleString('pt-BR');
+    return Number(valor || 0).toLocaleString(
+        'pt-BR'
+    );
 }
 
+// ==========================================
+// NOMES DAS MODALIDADES
+// ==========================================
+
+const NOMES_MODALIDADES = {
+    viaPlus: 'Via Plus',
+    semTaxa: 'Robux Sem Taxa',
+    taxado: 'Robux Taxado',
+    viaGrupo: 'Robux Via Grupo',
+    outro: 'Outra modalidade'
+};
+
+const NOMES_PAGAMENTOS = {
+    pix: 'PIX',
+    mm: 'Intermediário (MM)',
+    outro: 'Outro'
+};
 
 // ==========================================
 // COMANDO /VENDA
@@ -48,15 +58,18 @@ module.exports = {
         .setName('venda')
 
         .setDescription(
-            'Registra uma venda da InovareSale.'
+            'Registra uma venda manual da InovareSale.'
         )
 
         .setDefaultMemberPermissions(
             PermissionFlagsBits.Administrator
         )
 
-        .addUserOption(option =>
+        // ==================================
+        // CLIENTE
+        // ==================================
 
+        .addUserOption(option =>
             option
                 .setName('cliente')
                 .setDescription(
@@ -65,423 +78,345 @@ module.exports = {
                 .setRequired(true)
         )
 
-        .addNumberOption(option =>
+        // ==================================
+        // VALOR EM REAIS
+        // ==================================
 
+        .addNumberOption(option =>
             option
                 .setName('valor')
                 .setDescription(
-                    'Valor pago em reais'
+                    'Valor efetivamente pago em reais'
                 )
                 .setMinValue(0.01)
                 .setRequired(true)
         )
 
-        .addIntegerOption(option =>
+        // ==================================
+        // QUANTIDADE DE ROBUX
+        // ==================================
 
+        .addIntegerOption(option =>
             option
                 .setName('robux')
                 .setDescription(
-                    'Quantidade de Robux da venda'
+                    'Quantidade de Robux comprados'
                 )
                 .setMinValue(1)
                 .setRequired(true)
+        )
+
+        // ==================================
+        // MODALIDADE
+        // ==================================
+
+        .addStringOption(option =>
+            option
+                .setName('modalidade')
+                .setDescription(
+                    'Modalidade utilizada na venda'
+                )
+                .setRequired(false)
+                .addChoices(
+                    {
+                        name: 'Via Plus',
+                        value: 'viaPlus'
+                    },
+                    {
+                        name: 'Robux Sem Taxa',
+                        value: 'semTaxa'
+                    },
+                    {
+                        name: 'Robux Taxado',
+                        value: 'taxado'
+                    },
+                    {
+                        name: 'Robux Via Grupo',
+                        value: 'viaGrupo'
+                    },
+                    {
+                        name: 'Outra modalidade',
+                        value: 'outro'
+                    }
+                )
+        )
+
+        // ==================================
+        // USUÁRIO DO ROBLOX
+        // ==================================
+
+        .addStringOption(option =>
+            option
+                .setName('roblox')
+                .setDescription(
+                    'Username do cliente no Roblox'
+                )
+                .setMaxLength(50)
+                .setRequired(false)
+        )
+
+        // ==================================
+        // MÉTODO DE PAGAMENTO
+        // ==================================
+
+        .addStringOption(option =>
+            option
+                .setName('pagamento')
+                .setDescription(
+                    'Método de pagamento utilizado'
+                )
+                .setRequired(false)
+                .addChoices(
+                    {
+                        name: 'PIX',
+                        value: 'pix'
+                    },
+                    {
+                        name: 'Solicitar MM',
+                        value: 'mm'
+                    },
+                    {
+                        name: 'Outro',
+                        value: 'outro'
+                    }
+                )
         ),
 
+    // ======================================
+    // EXECUTAR COMANDO
+    // ======================================
 
     async execute(interaction) {
 
-        // ==================================
-        // PEGAR DADOS
-        // ==================================
-
-        const cliente =
-            interaction.options.getUser(
-                'cliente'
-            );
-
-        const valor =
-            interaction.options.getNumber(
-                'valor'
-            );
-
-        const robux =
-            interaction.options.getInteger(
-                'robux'
-            );
-
-
-        // ==================================
-        // IMPEDIR VENDA PARA BOT
-        // ==================================
-
-        if (cliente.bot) {
-
-            await interaction.reply({
-
+        // Apenas administradores
+        if (
+            !interaction.memberPermissions?.has(
+                PermissionFlagsBits.Administrator
+            )
+        ) {
+            return interaction.reply({
                 content:
-                    '❌ Você não pode registrar uma venda para um bot.',
-
-                flags:
-                    MessageFlags.Ephemeral
+                    '❌ Apenas administradores podem registrar vendas manualmente.',
+                flags: MessageFlags.Ephemeral
             });
-
-            return;
         }
 
-
-        // ==================================
-        // CONFIGURAÇÃO
-        // ==================================
-
-        const config =
-            getConfig();
-
-
-        if (!config.vendas?.canalId) {
-
-            await interaction.reply({
-
+        if (!interaction.guild) {
+            return interaction.reply({
                 content:
-                    '❌ O canal de vendas ainda não foi configurado.\nUse `/setup` primeiro.',
-
-                flags:
-                    MessageFlags.Ephemeral
+                    '❌ Este comando só funciona dentro do servidor.',
+                flags: MessageFlags.Ephemeral
             });
-
-            return;
         }
 
-
-        // ==================================
-        // BUSCAR CANAL DE VENDAS
-        // ==================================
-
-        const canal =
-            await interaction.guild.channels.fetch(
-                config.vendas.canalId
-            );
-
-
-        if (!canal?.isTextBased()) {
-
-            await interaction.reply({
-
-                content:
-                    '❌ Não consegui encontrar o canal de vendas configurado.',
-
-                flags:
-                    MessageFlags.Ephemeral
-            });
-
-            return;
-        }
-
-
-        // ==================================
-        // BUSCAR MEMBRO
-        // ==================================
-
-        let membro;
+        await interaction.deferReply({
+            flags: MessageFlags.Ephemeral
+        });
 
         try {
 
-            membro =
-                await interaction.guild.members.fetch(
-                    cliente.id
+            // ==================================
+            // OBTER DADOS DA VENDA
+            // ==================================
+
+            const cliente =
+                interaction.options.getUser(
+                    'cliente',
+                    true
                 );
 
-        } catch {
+            const valor =
+                interaction.options.getNumber(
+                    'valor',
+                    true
+                );
 
-            await interaction.reply({
+            const robux =
+                interaction.options.getInteger(
+                    'robux',
+                    true
+                );
 
-                content:
-                    '❌ Não consegui encontrar esse usuário no servidor.',
+            const modalidade =
+                interaction.options.getString(
+                    'modalidade'
+                ) || 'outro';
 
-                flags:
-                    MessageFlags.Ephemeral
+            const usuarioRoblox =
+                interaction.options.getString(
+                    'roblox'
+                )?.trim() || null;
+
+            const pagamento =
+                interaction.options.getString(
+                    'pagamento'
+                ) || 'outro';
+
+            // ==================================
+            // VALIDAR CLIENTE
+            // ==================================
+
+            if (cliente.bot) {
+                return interaction.editReply({
+                    content:
+                        '❌ Você não pode registrar uma venda para um bot.'
+                });
+            }
+
+            // ==================================
+            // VALIDAR VALORES
+            // ==================================
+
+            if (
+                !Number.isFinite(valor) ||
+                valor <= 0 ||
+                !Number.isSafeInteger(robux) ||
+                robux <= 0
+            ) {
+                return interaction.editReply({
+                    content:
+                        '❌ Valor ou quantidade de Robux inválidos.'
+                });
+            }
+
+            // ==================================
+            // VERIFICAR SE CLIENTE ESTÁ
+            // NO SERVIDOR
+            // ==================================
+
+            let membro;
+
+            try {
+                membro =
+                    await interaction.guild.members.fetch(
+                        cliente.id
+                    );
+            } catch {
+                return interaction.editReply({
+                    content:
+                        '❌ Não encontrei esse cliente no servidor.'
+                });
+            }
+
+            if (!membro) {
+                return interaction.editReply({
+                    content:
+                        '❌ Cliente não encontrado.'
+                });
+            }
+
+            // ==================================
+            // REGISTRAR VENDA
+            //
+            // A MESMA FUNÇÃO SERÁ UTILIZADA
+            // PELOS TICKETS AUTOMÁTICOS
+            // ==================================
+
+            const resultado = await registrarVenda({
+
+                guild: interaction.guild,
+
+                clienteId: cliente.id,
+
+                valor: valor,
+
+                robux: robux,
+
+                registradoPorId:
+                    interaction.user.id,
+
+                modalidade: modalidade,
+
+                usuarioRoblox: usuarioRoblox,
+
+                pagamento: pagamento,
+
+                origem: 'manual'
+
             });
 
-            return;
-        }
+            // ==================================
+            // CONFIRMAR REGISTRO
+            // ==================================
 
+            const dadosCliente =
+                resultado.dadosCliente;
 
-        // ==================================
-        // CARREGAR HISTÓRICO
-        // ==================================
+            let resposta =
+                '✅ **VENDA REGISTRADA COM SUCESSO!**\n\n' +
 
-        const sales =
-            getSales();
+                `👤 **Cliente:** <@${cliente.id}>\n` +
 
+                `💎 **Robux:** ${formatarRobux(robux)}\n` +
 
-        const guildId =
-            interaction.guild.id;
+                `💰 **Valor:** ${formatarDinheiro(valor)}\n` +
 
+                `🛒 **Modalidade:** ${NOMES_MODALIDADES[modalidade]}\n` +
 
-        if (!sales[guildId]) {
-            sales[guildId] = {};
-        }
+                `💳 **Pagamento:** ${NOMES_PAGAMENTOS[pagamento]}\n`;
 
+            if (usuarioRoblox) {
+                resposta +=
+                    `🎮 **Roblox:** ${usuarioRoblox}\n`;
+            }
 
-        if (!sales[guildId][cliente.id]) {
+            resposta +=
+                '\n━━━━━━━━━━━━━━━━━━\n\n' +
 
-            sales[guildId][cliente.id] = {
+                `📦 **Compras realizadas:** ${dadosCliente.quantidadeCompras}\n` +
 
-                totalGasto: 0,
+                `💵 **Total gasto:** ${formatarDinheiro(dadosCliente.totalGasto)}\n` +
 
-                totalRobux: 0,
+                `💎 **Total de Robux:** ${formatarRobux(dadosCliente.totalRobux)}\n`;
 
-                quantidadeCompras: 0,
+            // ==================================
+            // CARGO ATUALIZADO
+            // ==================================
 
-                historico: []
-            };
-        }
+            if (resultado.cargoId) {
+                resposta +=
+                    `\n🏆 **Cargo:** <@&${resultado.cargoId}>\n`;
+            }
 
+            if (resultado.erroCargo) {
+                resposta +=
+                    '\n⚠️ A venda foi registrada, ' +
+                    'mas não consegui atualizar o cargo do cliente.\n';
+            }
 
-        const dadosCliente =
-            sales[guildId][cliente.id];
+            // ==================================
+            // LINK DA PUBLICAÇÃO
+            // ==================================
 
+            if (resultado.publicacaoUrl) {
+                resposta +=
+                    '\n📢 **Publicação da venda:**\n' +
+                    resultado.publicacaoUrl;
+            } else {
+                resposta +=
+                    '\n⚠️ Verifique o canal de vendas: ' +
+                    'a publicação não foi confirmada.';
+            }
 
-        // ==================================
-        // ATUALIZAR TOTAL
-        // ==================================
-
-        dadosCliente.totalGasto =
-            Number(
-                (
-                    Number(dadosCliente.totalGasto || 0) +
-                    valor
-                ).toFixed(2)
-            );
-
-
-        dadosCliente.totalRobux =
-            Number(dadosCliente.totalRobux || 0) +
-            robux;
-
-
-        dadosCliente.quantidadeCompras =
-            Number(
-                dadosCliente.quantidadeCompras || 0
-            ) + 1;
-
-
-        // ==================================
-        // SALVAR VENDA NO HISTÓRICO
-        // ==================================
-
-        const venda = {
-
-            valor,
-
-            robux,
-
-            data:
-                new Date().toISOString(),
-
-            registradoPor:
-                interaction.user.id
-        };
-
-
-        dadosCliente.historico.push(
-            venda
-        );
-
-
-        saveSales(
-            sales
-        );
-
-
-        // ==================================
-        // ATUALIZAR CARGO
-        // ==================================
-
-        let novoCargo = null;
-
-        let erroCargo = false;
-
-
-        try {
-
-            novoCargo =
-                await atualizarCargo(
-
-                    membro,
-
-                    dadosCliente.totalGasto,
-
-                    config.cargos || {}
-                );
+            await interaction.editReply({
+                content: resposta,
+                allowedMentions: {
+                    parse: []
+                }
+            });
 
         } catch (erro) {
 
             console.error(
-                'Erro ao atualizar cargo:',
+                '❌ Erro no comando /venda:',
                 erro
             );
 
-            erroCargo = true;
+            await interaction.editReply({
+                content:
+                    '❌ Não consegui concluir o registro da venda.\n' +
+                    'Verifique os registros do bot antes de tentar novamente.'
+            });
         }
-
-
-        // ==================================
-        // DATA E HORÁRIO
-        // ==================================
-
-        const timestamp =
-            Math.floor(
-                Date.now() / 1000
-            );
-
-
-        // ==================================
-        // EMBED DA VENDA
-        // ==================================
-
-        const embed =
-            new EmbedBuilder()
-
-                .setColor(
-                    0xC0C0C0
-                )
-
-                .setTitle(
-                    '🛍️ ━ Venda concluída!'
-                )
-
-                .setDescription(
-                    'Uma nova venda foi registrada na **InovareSale**.\n\u200B'
-                )
-
-                .addFields(
-
-                    {
-                        name:
-                            '💵 Valor',
-                        value:
-                            `**${formatarDinheiro(valor)}**`,
-                        inline:
-                            true
-                    },
-
-                    {
-                        name:
-                            '💎 Robux',
-                        value:
-                            `**${formatarRobux(robux)} Robux**`,
-                        inline:
-                            true
-                    },
-
-                    {
-                        name:
-                            '👤 Cliente',
-                        value:
-                            `<@${cliente.id}>`,
-                        inline:
-                            false
-                    },
-
-                    {
-                        name:
-                            '💰 Total gasto pelo cliente',
-                        value:
-                            `**${formatarDinheiro(
-                                dadosCliente.totalGasto
-                            )}**`,
-                        inline:
-                            true
-                    },
-
-                    {
-                        name:
-                            '🛒 Compras realizadas',
-                        value:
-                            `**${dadosCliente.quantidadeCompras}**`,
-                        inline:
-                            true
-                    },
-
-                    {
-                        name:
-                            '🕐 Horário',
-                        value:
-                            `<t:${timestamp}:F>`,
-                        inline:
-                            false
-                    }
-                )
-
-                .setFooter({
-                    text:
-                        'InovareSale • Registro de Venda'
-                })
-
-                .setTimestamp();
-
-
-        // ==================================
-        // PUBLICAR
-        // ==================================
-
-        await canal.send({
-
-            content:
-                `🎉 Venda para <@${cliente.id}> registrada com sucesso!`,
-
-            embeds: [
-                embed
-            ],
-
-            allowedMentions: {
-                users: [
-                    cliente.id
-                ]
-            }
-        });
-
-
-        // ==================================
-        // RESPOSTA PARA O ADMIN
-        // ==================================
-
-        let resposta =
-
-            `✅ **Venda registrada!**\n\n` +
-
-            `👤 Cliente: <@${cliente.id}>\n` +
-
-            `💵 Valor: **${formatarDinheiro(valor)}**\n` +
-
-            `💎 Robux: **${formatarRobux(robux)}**\n` +
-
-            `💰 Total acumulado: **${formatarDinheiro(
-                dadosCliente.totalGasto
-            )}**`;
-
-
-        if (novoCargo) {
-
-            resposta +=
-                `\n🏆 Cargo atual: <@&${novoCargo}>`;
-        }
-
-
-        if (erroCargo) {
-
-            resposta +=
-                '\n\n⚠️ A venda foi registrada, mas não consegui atualizar o cargo do cliente.';
-        }
-
-
-        await interaction.reply({
-
-            content:
-                resposta,
-
-            flags:
-                MessageFlags.Ephemeral
-        });
     }
 };

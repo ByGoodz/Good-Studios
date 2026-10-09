@@ -1,3 +1,4 @@
+
 const {
     SlashCommandBuilder,
     PermissionFlagsBits,
@@ -16,26 +17,20 @@ const {
     saveConfig
 } = require('../utils/storage');
 
-
-// ================================
-// TRANSFORMAR TEXTO EM QUANTIDADE
-// ================================
+// ==========================================
+// FORMATAR QUANTIDADE
+// ==========================================
 
 function interpretarQuantidade(texto) {
-
-    let valor = texto
+    let valor = String(texto)
         .trim()
         .toLowerCase()
         .replace(/\s/g, '');
 
-    // Exemplo: 2.2k ou 2,2k
     if (valor.endsWith('k')) {
-
-        valor = valor
-            .replace('k', '')
-            .replace(',', '.');
-
-        const numero = Number(valor);
+        const numero = Number(
+            valor.slice(0, -1).replace(',', '.')
+        );
 
         if (!Number.isFinite(numero) || numero <= 0) {
             return null;
@@ -44,10 +39,11 @@ function interpretarQuantidade(texto) {
         return Math.floor(numero * 1000);
     }
 
-    // Exemplo: 2200 ou 2.200
-    valor = valor
-        .replace(/\./g, '')
-        .replace(',', '.');
+    if (!/^[\d.,]+$/.test(valor)) {
+        return null;
+    }
+
+    valor = valor.replace(/\./g, '').replace(',', '.');
 
     const numero = Number(valor);
 
@@ -58,528 +54,526 @@ function interpretarQuantidade(texto) {
     return Math.floor(numero);
 }
 
-
-// ================================
-// FORMATAR ESTOQUE
-// ================================
-
-function formatarEstoque(valor) {
-
-    if (valor >= 1000000) {
-
-        const numero = valor / 1000000;
-
-        return `${numero
-            .toFixed(numero % 1 === 0 ? 0 : 1)
-            .replace('.', ',')}M`;
-    }
-
-    if (valor >= 1000) {
-
-        const numero = valor / 1000;
-
-        return `${numero
-            .toFixed(numero % 1 === 0 ? 0 : 1)
-            .replace('.', '.')}k`;
-    }
-
-    return valor.toLocaleString('pt-BR');
+function formatarQuantidade(valor) {
+    return Number(valor).toLocaleString('pt-BR');
 }
 
-
-// ================================
-// FORMATAR PREÇO K
-// ================================
-
 function formatarK(valor) {
-
-    const numero = Number(valor);
-
-    return `K${numero.toLocaleString('pt-BR', {
+    return `K${Number(valor).toLocaleString('pt-BR', {
         maximumFractionDigits: 2
     })}`;
 }
 
+// ==========================================
+// IDENTIFICAR MENSAGENS DE ESTOQUE
+// ==========================================
 
-// ================================
+function ehMensagemDeEstoque(mensagem, botId) {
+    if (mensagem.author.id !== botId) {
+        return false;
+    }
+
+    const texto = mensagem.content || '';
+
+    return (
+        texto.includes('𝐋𝐎𝐉𝐀 𝐎𝐍') ||
+        texto.includes('𝐋𝐎𝐉𝐀 𝐎𝐅𝐅') ||
+        texto.includes('LOJA ON!') ||
+        texto.includes('LOJA OFF!') ||
+        texto.includes('📦 Estoque disponível:')
+    );
+}
+
+// ==========================================
+// ENCONTRAR ÚLTIMA PUBLICAÇÃO
+// ==========================================
+
+async function buscarUltimaMensagem(canal, config, botId) {
+    const idSalvo = config.estoque?.ultimaMensagemId;
+
+    if (idSalvo) {
+        try {
+            const mensagem = await canal.messages.fetch(idSalvo);
+
+            if (mensagem.author.id === botId) {
+                return mensagem;
+            }
+        } catch (erro) {
+            console.log(
+                'Última publicação não encontrada pelo ID.'
+            );
+        }
+    }
+
+    // Compatibilidade com mensagens publicadas
+    // antes desta atualização.
+    const mensagens = await canal.messages.fetch({
+        limit: 100
+    });
+
+    return mensagens.find(
+        mensagem => ehMensagemDeEstoque(mensagem, botId)
+    ) || null;
+}
+
+// ==========================================
+// CRIAR TEXTO DO ESTOQUE
+// ==========================================
+
+function criarTextoEstoque(config) {
+    const estoque = config.estoque;
+
+    if (estoque.status === 'OFF') {
+        return (
+            '🔴 **𝐋𝐎𝐉𝐀 𝐎𝐅𝐅!**\n\n' +
+            '📦 No momento, nossas vendas estão ' +
+            'temporariamente pausadas.\n\n' +
+            '🔔 Assim que o estoque estiver disponível ' +
+            'novamente, avisaremos por aqui.\n\n' +
+            '💎 **InovareSale • Sua loja de Robux**'
+        );
+    }
+
+    const quantidade = formatarQuantidade(
+        estoque.quantidade
+    );
+
+    const preco = formatarK(
+        estoque.precoK ?? 39
+    );
+
+    const canalCompra = estoque.canalCompraId
+        ? `<#${estoque.canalCompraId}>`
+        : 'Canal não configurado';
+
+    return (
+        '🟢 **𝐋𝐎𝐉𝐀 𝐎𝐍!**\n\n' +
+        `📦 **𝐄𝐬𝐭𝐨𝐪𝐮𝐞 𝐝𝐢𝐬𝐩𝐨𝐧𝐢́𝐯𝐞𝐥:** ${quantidade} Robux\n\n` +
+        `💸 **𝐏𝐫𝐞𝐜̧𝐨:** ${preco}\n\n` +
+        '**𝐏𝐚𝐫𝐚 𝐜𝐨𝐦𝐩𝐫𝐚𝐫, 𝐚𝐜𝐞𝐬𝐬𝐞:**\n' +
+        `${canalCompra}\n\n` +
+        '💬 **Dúvidas podem ser tratadas ' +
+        'no ticket de compra.**\n\n' +
+        '⚠️ **Pagamento somente após autorização ' +
+        'da equipe.**\n\n' +
+        '💎 **InovareSale • Sua loja de Robux**'
+    );
+}
+
+// ==========================================
+// PUBLICAR E SUBSTITUIR ESTOQUE
+// ==========================================
+
+async function publicarEstoque(guild, client, config) {
+    const canal = await guild.channels.fetch(
+        config.estoque.canalId
+    );
+
+    if (
+        !canal ||
+        !canal.isTextBased() ||
+        !canal.messages
+    ) {
+        throw new Error(
+            'Canal de estoque inválido ou inacessível.'
+        );
+    }
+
+    // Primeiro publica a mensagem nova.
+    const mensagemNova = await canal.send({
+        content: criarTextoEstoque(config),
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+    // Salva o ID antes de tentar limpar as antigas.
+    const idAnterior = config.estoque.ultimaMensagemId;
+
+    config.estoque.ultimaMensagemId = mensagemNova.id;
+    saveConfig(config);
+
+    const antigas = new Map();
+
+    if (idAnterior && idAnterior !== mensagemNova.id) {
+        try {
+            const anterior = await canal.messages.fetch(
+                idAnterior
+            );
+
+            if (anterior.author.id === client.user.id) {
+                antigas.set(anterior.id, anterior);
+            }
+        } catch (erro) {
+            // A mensagem antiga pode ter sido apagada.
+        }
+    }
+
+    // Procura também publicações antigas realizadas
+    // antes de existir a configuração ultimaMensagemId.
+    try {
+        const recentes = await canal.messages.fetch({
+            limit: 100
+        });
+
+        for (const mensagem of recentes.values()) {
+            if (
+                mensagem.id !== mensagemNova.id &&
+                ehMensagemDeEstoque(
+                    mensagem,
+                    client.user.id
+                )
+            ) {
+                antigas.set(mensagem.id, mensagem);
+            }
+        }
+    } catch (erro) {
+        console.error(
+            'Erro ao localizar estoques antigos:',
+            erro
+        );
+    }
+
+    for (const mensagem of antigas.values()) {
+        try {
+            await mensagem.delete();
+        } catch (erro) {
+            console.error(
+                'Não foi possível apagar estoque antigo:',
+                erro
+            );
+        }
+    }
+
+    return mensagemNova;
+}
+
+// ==========================================
+// CRIAR MODAL DE QUANTIDADE
+// ==========================================
+
+function criarModalQuantidade() {
+    const modal = new ModalBuilder()
+        .setCustomId('estoque_v2_quantidade')
+        .setTitle('Estoque disponível');
+
+    const input = new TextInputBuilder()
+        .setCustomId('quantidade')
+        .setLabel('Quantos Robux temos em estoque?')
+        .setPlaceholder('Exemplo: 5000 ou 5k')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(input)
+    );
+
+    return modal;
+}
+
+// ==========================================
+// CRIAR MODAL DE EDIÇÃO
+// ==========================================
+
+function criarModalEdicao(textoAtual) {
+    const modal = new ModalBuilder()
+        .setCustomId('estoque_v2_editar')
+        .setTitle('Editar última publicação');
+
+    const input = new TextInputBuilder()
+        .setCustomId('mensagem')
+        .setLabel('Texto da publicação')
+        .setStyle(TextInputStyle.Paragraph)
+        .setMaxLength(2000)
+        .setRequired(true)
+        .setValue(textoAtual.slice(0, 2000));
+
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(input)
+    );
+
+    return modal;
+}
+
+// ==========================================
 // COMANDO /ESTOQUE
-// ================================
+// ==========================================
 
 module.exports = {
-
     data: new SlashCommandBuilder()
-
         .setName('estoque')
-
         .setDescription(
-            'Atualiza o status e o estoque da InovareSale.'
+            'Gerencia o status e o estoque da InovareSale.'
         )
-
         .setDefaultMemberPermissions(
             PermissionFlagsBits.Administrator
         ),
 
-
-    async execute(interaction) {
-
+    async execute(interaction, client) {
         const config = getConfig();
 
-
-        // ================================
-        // VERIFICAR CONFIGURAÇÃO
-        // ================================
-
         if (!config.estoque?.canalId) {
-
-            await interaction.reply({
-
+            return interaction.reply({
                 content:
-                    '❌ O canal de estoque ainda não foi configurado.\nUse `/setup` primeiro.',
-
-                flags:
-                    MessageFlags.Ephemeral
+                    '❌ Configure o canal de estoque no `/setup`.',
+                flags: MessageFlags.Ephemeral
             });
-
-            return;
         }
-
-
-        if (!config.estoque?.canalCompraId) {
-
-            await interaction.reply({
-
-                content:
-                    '❌ O canal de compra ainda não foi configurado.\nUse `/setup` primeiro.',
-
-                flags:
-                    MessageFlags.Ephemeral
-            });
-
-            return;
-        }
-
-
-        // ================================
-        // PAINEL ON / OFF
-        // ================================
 
         const embed = new EmbedBuilder()
-
-            .setTitle(
-                '📦 Atualizar Estoque — InovareSale'
-            )
-
+            .setColor(0xC0C0C0)
+            .setTitle('📦 Estoque — InovareSale')
             .setDescription(
-                'Escolha o estado atual da loja.\n\n' +
-
-                '🟢 **LOJA ON**\n' +
-                'A loja está funcionando e existe estoque disponível.\n\n' +
-
-                '🔴 **LOJA OFF**\n' +
-                'As vendas estão temporariamente pausadas.'
+                'Gerencie a publicação de estoque da loja.\n\n' +
+                '🟢 **Loja ON:** informa uma quantidade ' +
+                'e publica o estoque disponível.\n\n' +
+                '🔴 **Loja OFF:** informa que as vendas ' +
+                'estão pausadas.\n\n' +
+                '✏️ **Editar última:** altera diretamente ' +
+                'o texto da publicação atual.\n\n' +
+                'Uma nova publicação substitui as anteriores.'
             )
-
             .setFooter({
-                text:
-                    'InovareSale • Gerenciamento de Estoque'
+                text: 'InovareSale • Gerenciamento de Estoque'
             });
-
 
         const botoes = new ActionRowBuilder()
-
             .addComponents(
-
                 new ButtonBuilder()
-
-                    .setCustomId('estoque_on')
-
+                    .setCustomId('estoque_v2_on')
                     .setLabel('Loja ON')
-
                     .setEmoji('🟢')
-
-                    .setStyle(
-                        ButtonStyle.Success
-                    ),
-
+                    .setStyle(ButtonStyle.Success),
 
                 new ButtonBuilder()
-
-                    .setCustomId('estoque_off')
-
+                    .setCustomId('estoque_v2_off')
                     .setLabel('Loja OFF')
-
                     .setEmoji('🔴')
+                    .setStyle(ButtonStyle.Danger),
 
-                    .setStyle(
-                        ButtonStyle.Danger
-                    )
+                new ButtonBuilder()
+                    .setCustomId('estoque_v2_editar_botao')
+                    .setLabel('Editar última')
+                    .setEmoji('✏️')
+                    .setStyle(ButtonStyle.Secondary)
             );
 
-
         await interaction.reply({
-
             embeds: [embed],
-
             components: [botoes],
-
-            flags:
-                MessageFlags.Ephemeral
+            flags: MessageFlags.Ephemeral
         });
 
+        const painel = await interaction.fetchReply();
 
-        const mensagem =
-            await interaction.fetchReply();
+        const collector = painel.createMessageComponentCollector({
+            filter: i => i.user.id === interaction.user.id,
+            time: 120000,
+            max: 1
+        });
 
-
-        const collector =
-            mensagem.createMessageComponentCollector({
-
-                filter: i =>
-                    i.user.id ===
-                    interaction.user.id,
-
-                time: 120000
-            });
-
-
-        // ================================
-        // CLIQUE NOS BOTÕES
-        // ================================
-
-        collector.on(
-            'collect',
-            async i => {
-
-                // ========================
+        collector.on('collect', async i => {
+            try {
+                // ==============================
                 // LOJA OFF
-                // ========================
+                // ==============================
 
-                if (
-                    i.customId ===
-                    'estoque_off'
-                ) {
+                if (i.customId === 'estoque_v2_off') {
+                    await i.deferUpdate();
 
-                    const configAtual =
-                        getConfig();
+                    const atual = getConfig();
+                    atual.estoque.status = 'OFF';
+                    atual.estoque.quantidade = 0;
 
-
-                    if (!configAtual.estoque) {
-                        configAtual.estoque = {};
-                    }
-
-
-                    configAtual.estoque.status =
-                        'OFF';
-
-                    configAtual.estoque.quantidade =
-                        0;
-
-
-                    saveConfig(
-                        configAtual
+                    await publicarEstoque(
+                        interaction.guild,
+                        client,
+                        atual
                     );
 
-
-                    const canal =
-                        await interaction.guild.channels.fetch(
-                            configAtual
-                                .estoque
-                                .canalId
-                        );
-
-
-                    if (!canal?.isTextBased()) {
-
-                        await i.update({
-
-                            content:
-                                '❌ Não consegui encontrar o canal de estoque configurado.',
-
-                            embeds: [],
-
-                            components: []
-                        });
-
-                        collector.stop();
-
-                        return;
-                    }
-
-
-                    await canal.send({
-
+                    await interaction.editReply({
                         content:
-                            '🔴 **𝐋𝐎𝐉𝐀 𝐎𝐅𝐅!**\n\n' +
-
-                            '📦 No momento, nossas vendas estão temporariamente pausadas.\n\n' +
-
-                            '🔔 Assim que o estoque estiver disponível novamente, avisaremos por aqui.\n\n' +
-
-                            '@everyone',
-
-                        allowedMentions: {
-                            parse: ['everyone']
-                        }
-                    });
-
-
-                    await i.update({
-
-                        content:
-                            '✅ Loja marcada como **OFF** e aviso publicado.',
-
+                            '✅ Loja OFF! A publicação anterior foi substituída.',
                         embeds: [],
-
                         components: []
                     });
-
-
-                    collector.stop();
 
                     return;
                 }
 
-
-                // ========================
+                // ==============================
                 // LOJA ON
-                // ========================
+                // ==============================
+
+                if (i.customId === 'estoque_v2_on') {
+                    await i.showModal(
+                        criarModalQuantidade()
+                    );
+
+                    const resposta = await i.awaitModalSubmit({
+                        filter: modal =>
+                            modal.customId === 'estoque_v2_quantidade' &&
+                            modal.user.id === interaction.user.id,
+                        time: 120000
+                    });
+
+                    await resposta.deferReply({
+                        flags: MessageFlags.Ephemeral
+                    });
+
+                    const quantidade = interpretarQuantidade(
+                        resposta.fields.getTextInputValue(
+                            'quantidade'
+                        )
+                    );
+
+                    if (!quantidade) {
+                        await resposta.editReply({
+                            content:
+                                '❌ Quantidade inválida. Use `5000` ou `5k`.'
+                        });
+                        return;
+                    }
+
+                    const atual = getConfig();
+
+                    atual.estoque.status = 'ON';
+                    atual.estoque.quantidade = quantidade;
+
+                    await publicarEstoque(
+                        interaction.guild,
+                        client,
+                        atual
+                    );
+
+                    await resposta.editReply({
+                        content:
+                            `✅ Loja ON! Estoque publicado: **${formatarQuantidade(quantidade)} Robux**.`
+                    });
+
+                    await interaction.editReply({
+                        components: []
+                    });
+
+                    return;
+                }
+
+                // ==============================
+                // EDITAR ÚLTIMA PUBLICAÇÃO
+                // ==============================
 
                 if (
                     i.customId ===
-                    'estoque_on'
+                    'estoque_v2_editar_botao'
                 ) {
+                    const atual = getConfig();
 
-                    const modal =
-                        new ModalBuilder()
-
-                            .setCustomId(
-                                `estoque_quantidade_${interaction.id}`
-                            )
-
-                            .setTitle(
-                                'Estoque disponível'
-                            );
-
-
-                    const input =
-                        new TextInputBuilder()
-
-                            .setCustomId(
-                                'quantidade'
-                            )
-
-                            .setLabel(
-                                'Quantos Robux temos em estoque?'
-                            )
-
-                            .setPlaceholder(
-                                'Exemplo: 2200 ou 2.2k'
-                            )
-
-                            .setStyle(
-                                TextInputStyle.Short
-                            )
-
-                            .setRequired(true);
-
-
-                    const linha =
-                        new ActionRowBuilder()
-                            .addComponents(
-                                input
-                            );
-
-
-                    modal.addComponents(
-                        linha
-                    );
-
-
-                    await i.showModal(
-                        modal
-                    );
-
-
-                    // ====================
-                    // ESPERAR QUANTIDADE
-                    // ====================
-
-                    try {
-
-                        const modalSubmit =
-                            await i.awaitModalSubmit({
-
-                                filter: modalInteraction =>
-
-                                    modalInteraction
-                                        .customId ===
-                                    `estoque_quantidade_${interaction.id}`
-
-                                    &&
-
-                                    modalInteraction
-                                        .user
-                                        .id ===
-                                    interaction.user.id,
-
-                                time: 120000
-                            });
-
-
-                        const texto =
-                            modalSubmit
-                                .fields
-                                .getTextInputValue(
-                                    'quantidade'
-                                );
-
-
-                        const quantidade =
-                            interpretarQuantidade(
-                                texto
-                            );
-
-
-                        if (!quantidade) {
-
-                            await modalSubmit.reply({
-
-                                content:
-                                    '❌ Quantidade inválida. Use algo como `2200` ou `2.2k`.',
-
-                                flags:
-                                    MessageFlags.Ephemeral
-                            });
-
-                            return;
-                        }
-
-
-                        const configAtual =
-                            getConfig();
-
-
-                        if (!configAtual.estoque) {
-                            configAtual.estoque = {};
-                        }
-
-
-                        configAtual
-                            .estoque
-                            .status =
-                            'ON';
-
-
-                        configAtual
-                            .estoque
-                            .quantidade =
-                            quantidade;
-
-
-                        saveConfig(
-                            configAtual
+                    const canal = await interaction.guild
+                        .channels.fetch(
+                            atual.estoque.canalId
                         );
 
-
-                        // ====================
-                        // PEGAR CANAL
-                        // ====================
-
-                        const canal =
-                            await interaction
-                                .guild
-                                .channels
-                                .fetch(
-                                    configAtual
-                                        .estoque
-                                        .canalId
-                                );
-
-
-                        if (!canal?.isTextBased()) {
-
-                            await modalSubmit.reply({
-
-                                content:
-                                    '❌ Não consegui encontrar o canal de estoque.',
-
-                                flags:
-                                    MessageFlags.Ephemeral
-                            });
-
-                            return;
-                        }
-
-
-                        const estoqueFormatado =
-                            formatarEstoque(
-                                quantidade
-                            );
-
-
-                        const preco =
-                            formatarK(
-                                configAtual
-                                    .estoque
-                                    .precoK ||
-                                39
-                            );
-
-
-                        const canalCompra =
-                            configAtual
-                                .estoque
-                                .canalCompraId;
-
-
-                        // ====================
-                        // PUBLICAR ESTOQUE
-                        // ====================
-
-                        await canal.send({
-
+                    if (
+                        !canal ||
+                        !canal.isTextBased() ||
+                        !canal.messages
+                    ) {
+                        await i.update({
                             content:
-                                '🟢 **𝐋𝐎𝐉𝐀 𝐎𝐍!**\n\n' +
-
-                                `📦 **𝐄𝐬𝐭𝐨𝐪𝐮𝐞 𝐝𝐢𝐬𝐩𝐨𝐧𝐢́𝐯𝐞𝐥:** ${estoqueFormatado}\n\n` +
-
-                                `💸 **𝐏𝐫𝐞𝐜̧𝐨:** **${preco}**\n\n` +
-
-                                '**𝐏𝐚𝐫𝐚 𝐜𝐨𝐦𝐩𝐫𝐚𝐫, 𝐚𝐜𝐞𝐬𝐬𝐞:**\n' +
-
-                                `<#${canalCompra}>\n\n` +
-
-                                '💬 **𝐃𝐮́𝐯𝐢𝐝𝐚𝐬 𝐩𝐨𝐝𝐞𝐦 𝐬𝐞𝐫 𝐭𝐫𝐚𝐭𝐚𝐝𝐚𝐬 𝐧𝐨 𝐭𝐢𝐜𝐤𝐞𝐭 𝐝𝐞 𝐜𝐨𝐦𝐩𝐫𝐚.**\n' +
-
-                                '**𝐏𝐚𝐠𝐚𝐦𝐞𝐧𝐭𝐨 𝐬𝐨́ 𝐚𝐩𝐨́𝐬 𝐚 𝐚𝐮𝐭𝐨𝐫𝐢𝐳𝐚𝐜̧𝐚̃𝐨.**\n\n' +
-
-                                '@everyone',
-
-                            allowedMentions: {
-                                parse: ['everyone']
-                            }
+                                '❌ Canal de estoque não encontrado.',
+                            embeds: [],
+                            components: []
                         });
-
-
-                        await modalSubmit.reply({
-
-                            content:
-                                `✅ Loja marcada como **ON**.\nEstoque publicado: **${estoqueFormatado} Robux**.`,
-
-                            flags:
-                                MessageFlags.Ephemeral
-                        });
-
-
-                        collector.stop();
-
-                    } catch {
-
-                        // O administrador demorou
-                        // mais de 2 minutos.
+                        return;
                     }
+
+                    const mensagem = await buscarUltimaMensagem(
+                        canal,
+                        atual,
+                        client.user.id
+                    );
+
+                    if (!mensagem) {
+                        await i.update({
+                            content:
+                                '❌ Ainda não existe publicação de estoque para editar.',
+                            embeds: [],
+                            components: []
+                        });
+                        return;
+                    }
+
+                    await i.showModal(
+                        criarModalEdicao(mensagem.content)
+                    );
+
+                    const resposta = await i.awaitModalSubmit({
+                        filter: modal =>
+                            modal.customId === 'estoque_v2_editar' &&
+                            modal.user.id === interaction.user.id,
+                        time: 120000
+                    });
+
+                    await resposta.deferReply({
+                        flags: MessageFlags.Ephemeral
+                    });
+
+                    const novoTexto = resposta.fields
+                        .getTextInputValue('mensagem')
+                        .trim();
+
+                    if (!novoTexto) {
+                        await resposta.editReply({
+                            content: '❌ A mensagem não pode ficar vazia.'
+                        });
+                        return;
+                    }
+
+                    await mensagem.edit({
+                        content: novoTexto,
+                        allowedMentions: {
+                            parse: []
+                        }
+                    });
+
+                    atual.estoque.ultimaMensagemId =
+                        mensagem.id;
+
+                    saveConfig(atual);
+
+                    await resposta.editReply({
+                        content:
+                            '✅ Última publicação editada com sucesso!'
+                    });
+
+                    await interaction.editReply({
+                        components: []
+                    });
                 }
+
+            } catch (erro) {
+                console.error(
+                    'Erro no comando /estoque:',
+                    erro
+                );
+
+                try {
+                    await interaction.editReply({
+                        content:
+                            '❌ Ocorreu um erro ao atualizar o estoque. Verifique os logs.',
+                        embeds: [],
+                        components: []
+                    });
+                } catch {}
             }
-        );
+        });
+
+        collector.on('end', async () => {
+            try {
+                await interaction.editReply({
+                    components: []
+                });
+            } catch {}
+        });
     }
 };
