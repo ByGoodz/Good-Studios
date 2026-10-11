@@ -1,6 +1,9 @@
 
+'use strict';
+
 const {
-    EmbedBuilder
+    EmbedBuilder,
+    escapeMarkdown
 } = require('discord.js');
 
 const {
@@ -13,17 +16,28 @@ const {
 } = require('../utils/roles');
 
 // ==========================================
-// INOVARESALE BOT 2.0
+// INOVARESALE BOT 3.0
 // SERVIÇO DE PERFIS DOS CLIENTES
 // ==========================================
 
-const COR_PRINCIPAL = 0xC0C0C0;
+const CONFIG = {
+    nome: 'InovareSale',
+    versao: '3.0.0',
+    cor: 0x9951CB,
+    limiteHistorico: 5
+};
 
 // ==========================================
-// NÍVEIS DOS CLIENTES
+// NÍVEIS DE CLIENTES
 // ==========================================
 
-const NIVEIS = [
+// Os valores são os mesmos utilizados
+// pelo sistema de cargos da InovareSale.
+//
+// Não alterar as chaves: elas são usadas
+// no /setup e nas configurações salvas.
+
+const NIVEIS = Object.freeze([
     {
         minimo: 10000,
         nome: 'Cliente Supremo',
@@ -66,130 +80,41 @@ const NIVEIS = [
         emoji: '🥉',
         chave: 'primeiraCompra'
     }
-];
+]);
 
 // ==========================================
-// FORMATAÇÕES
+// FORMATAR NÚMEROS
 // ==========================================
+
+function numeroSeguro(valor) {
+    const numero = Number(valor);
+
+    if (
+        !Number.isFinite(numero) ||
+        numero < 0
+    ) {
+        return 0;
+    }
+
+    return numero;
+}
 
 function formatarDinheiro(valor) {
-    return Number(valor || 0).toLocaleString(
+    return numeroSeguro(valor).toLocaleString(
         'pt-BR',
         {
             style: 'currency',
-            currency: 'BRL'
+            currency: 'BRL',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
         }
     );
 }
 
 function formatarRobux(valor) {
     return Math.floor(
-        Number(valor || 0)
+        numeroSeguro(valor)
     ).toLocaleString('pt-BR');
-}
-
-// ==========================================
-// IDENTIFICAR NÍVEL DO CLIENTE
-// ==========================================
-
-function obterNivelCliente(totalGasto) {
-    const total = Number(totalGasto || 0);
-
-    for (const nivel of NIVEIS) {
-        if (total >= nivel.minimo) {
-            return nivel;
-        }
-    }
-
-    return {
-        minimo: 0,
-        nome: 'Visitante',
-        emoji: '🌟',
-        chave: null
-    };
-}
-
-// ==========================================
-// PRÓXIMO NÍVEL
-// ==========================================
-
-function obterProximoNivel(totalGasto) {
-    const total = Number(totalGasto || 0);
-
-    const niveisCrescentes = [
-        ...NIVEIS
-    ].reverse();
-
-    for (const nivel of niveisCrescentes) {
-        if (total < nivel.minimo) {
-            return {
-                ...nivel,
-
-                falta: Number(
-                    (nivel.minimo - total).toFixed(2)
-                )
-            };
-        }
-    }
-
-    return null;
-}
-
-// ==========================================
-// FORMATAR HISTÓRICO DE COMPRAS
-// ==========================================
-
-function formatarHistorico(
-    historico = [],
-    limite = 5
-) {
-    if (
-        !Array.isArray(historico) ||
-        historico.length === 0
-    ) {
-        return 'Nenhuma compra registrada ainda.';
-    }
-
-    const compras = historico
-        .slice(-limite)
-        .reverse();
-
-    return compras.map((compra, indice) => {
-        const numero =
-            historico.length - indice;
-
-        const valor = formatarDinheiro(
-            compra.valor
-        );
-
-        const robux = formatarRobux(
-            compra.robux
-        );
-
-        let data = '';
-
-        if (compra.data) {
-            const timestamp = Date.parse(
-                compra.data
-            );
-
-            if (Number.isFinite(timestamp)) {
-                data =
-                    ` • <t:${Math.floor(timestamp / 1000)}:d>`;
-            }
-        }
-
-        const modalidade =
-            compra.modalidade
-                ? `\n📦 ${formatarModalidade(compra.modalidade)}`
-                : '';
-
-        return (
-            `**Compra #${numero}**${data}\n` +
-            `💎 ${robux} Robux • ${valor}` +
-            modalidade
-        );
-    }).join('\n\n');
 }
 
 // ==========================================
@@ -210,8 +135,154 @@ function formatarModalidade(chave) {
 }
 
 // ==========================================
-// BUSCAR DADOS DO CLIENTE
+// IDENTIFICAR NÍVEL DO CLIENTE
 // ==========================================
+
+function obterNivelCliente(totalGasto) {
+    const total = numeroSeguro(
+        totalGasto
+    );
+
+    for (const nivel of NIVEIS) {
+        if (total >= nivel.minimo) {
+            return nivel;
+        }
+    }
+
+    return {
+        minimo: 0,
+        nome: 'Visitante',
+        emoji: '🌟',
+        chave: null
+    };
+}
+
+// ==========================================
+// IDENTIFICAR PRÓXIMO NÍVEL
+// ==========================================
+
+function obterProximoNivel(totalGasto) {
+    const total = numeroSeguro(
+        totalGasto
+    );
+
+    const niveisCrescentes = [
+        ...NIVEIS
+    ].reverse();
+
+    for (const nivel of niveisCrescentes) {
+        if (total < nivel.minimo) {
+            return {
+                ...nivel,
+
+                falta: Number(
+                    (
+                        nivel.minimo - total
+                    ).toFixed(2)
+                )
+            };
+        }
+    }
+
+    // Já alcançou o nível máximo.
+    return null;
+}
+
+// ==========================================
+// FORMATAR HISTÓRICO DE COMPRAS
+// ==========================================
+
+function formatarHistorico(
+    historico = [],
+    limite = CONFIG.limiteHistorico
+) {
+    if (
+        !Array.isArray(historico) ||
+        historico.length === 0
+    ) {
+        return 'Nenhuma compra registrada ainda.';
+    }
+
+    const quantidade = Math.min(
+        10,
+        Math.max(
+            1,
+            Math.floor(Number(limite) || 5)
+        )
+    );
+
+    const compras = historico
+        .slice(-quantidade)
+        .reverse();
+
+    const linhas = compras.map(
+        (compra, indice) => {
+            const numeroCompra =
+                historico.length - indice;
+
+            const valor = formatarDinheiro(
+                compra.valor
+            );
+
+            const robux = formatarRobux(
+                compra.robux
+            );
+
+            // Data exibida no horário local
+            // definido pelo próprio Discord.
+            let data = '';
+
+            if (compra.data) {
+                const timestamp = Date.parse(
+                    compra.data
+                );
+
+                if (Number.isFinite(timestamp)) {
+                    data =
+                        ` • <t:${Math.floor(
+                            timestamp / 1000
+                        )}:d>`;
+                }
+            }
+
+            const modalidade =
+                compra.modalidade
+                    ? (
+                        '\n📦 ' +
+                        formatarModalidade(
+                            compra.modalidade
+                        )
+                    )
+                    : '';
+
+            return (
+                `**Compra #${numeroCompra}**${data}\n` +
+                `💎 ${robux} Robux • ${valor}` +
+                modalidade
+            );
+        }
+    );
+
+    const texto = linhas.join('\n\n');
+
+    // Discord permite no máximo 1024
+    // caracteres em um campo de embed.
+    if (texto.length > 1024) {
+        return texto.slice(0, 1020) + '...';
+    }
+
+    return texto;
+}
+
+// ==========================================
+// BUSCAR COMPRAS SALVAS
+// ==========================================
+
+// A função getSales() utiliza o
+// armazenamento atual do projeto.
+//
+// Não recriamos históricos e não
+// sobrescrevemos o SQLite.
 
 function buscarDadosCliente(
     servidorId,
@@ -232,19 +303,23 @@ function buscarDadosCliente(
     }
 
     return {
-        totalGasto: Number(
-            dados.totalGasto || 0
+        totalGasto: numeroSeguro(
+            dados.totalGasto
         ),
 
-        totalRobux: Number(
-            dados.totalRobux || 0
+        totalRobux: numeroSeguro(
+            dados.totalRobux
         ),
 
-        quantidadeCompras: Number(
-            dados.quantidadeCompras || 0
+        quantidadeCompras: Math.floor(
+            numeroSeguro(
+                dados.quantidadeCompras
+            )
         ),
 
-        historico: Array.isArray(dados.historico)
+        historico: Array.isArray(
+            dados.historico
+        )
             ? dados.historico
             : []
     };
@@ -285,32 +360,37 @@ async function obterPerfil({
     );
 
     // ======================================
-    // CONSULTAR CARGO NO SERVIDOR
+    // VERIFICAR CARGO DO MEMBRO
     // ======================================
 
     let cargoAtualId = null;
 
     try {
-        const membro = await guild.members.fetch(
-            clienteId
-        );
+        const membro =
+            await guild.members.fetch(
+                clienteId
+            );
 
         if (
             cargoIdeal &&
-            membro.roles.cache.has(cargoIdeal)
+            membro.roles.cache.has(
+                cargoIdeal
+            )
         ) {
             cargoAtualId = cargoIdeal;
         }
 
     } catch (erro) {
-        console.log(
+        console.warn(
+            '[InovareSale | Perfil] ' +
             'Não foi possível consultar o cargo:',
-            clienteId
+            clienteId,
+            erro.message
         );
     }
 
     // ======================================
-    // RETORNAR PERFIL
+    // RETORNAR DADOS COMPLETOS
     // ======================================
 
     return {
@@ -319,6 +399,7 @@ async function obterPerfil({
 
         totalGasto: dados.totalGasto,
         totalRobux: dados.totalRobux,
+
         quantidadeCompras:
             dados.quantidadeCompras,
 
@@ -333,69 +414,96 @@ async function obterPerfil({
 }
 
 // ==========================================
-// CRIAR EMBED DO PERFIL
+// CRIAR EMBED DO PERFIL 3.0
 // ==========================================
 
 function criarEmbedPerfil(
     perfil,
     usuario
 ) {
-    const nivel = perfil.nivel;
+    const nivel = perfil.nivel ||
+        obterNivelCliente(
+            perfil.totalGasto
+        );
+
+    const nomeUsuario = escapeMarkdown(
+        String(
+            usuario.globalName ||
+            usuario.username ||
+            'Cliente'
+        ).slice(0, 60)
+    );
 
     const embed = new EmbedBuilder()
-        .setColor(COR_PRINCIPAL)
+        .setColor(CONFIG.cor)
 
         .setTitle(
-            `👤 Perfil — ${usuario.username}`
+            'INOVARESALE | PERFIL DO CLIENTE'
         )
 
         .setDescription(
-            '💎 **INOVARESALE — PERFIL DE CLIENTE**\n\n' +
-
-            'Bem-vindo ao seu histórico ' +
-            'de compras na InovareSale!\n\n' +
-
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-            `🏆 **Classificação:** ` +
-            `${nivel.emoji} ${nivel.nome}\n\n` +
-
-            `🎖️ **Cargo atual:** ` +
-            (
-                perfil.cargoAtualId
-                    ? `<@&${perfil.cargoAtualId}>`
-                    : '`Não atribuído`'
-            )
+            `**Cliente:** ${nomeUsuario}\n` +
+            `**Classificação:** ${nivel.emoji} ${nivel.nome}`
         )
 
         .setThumbnail(
             usuario.displayAvatarURL({
-                size: 256
+                size: 256,
+                extension: 'png'
             })
-        )
-
-        .addFields(
-            {
-                name: '🛍️ Compras realizadas',
-                value:
-                    `**${perfil.quantidadeCompras}**`,
-                inline: true
-            },
-
-            {
-                name: '💰 Total gasto',
-                value:
-                    `**${formatarDinheiro(perfil.totalGasto)}**`,
-                inline: true
-            },
-
-            {
-                name: '💎 Robux comprados',
-                value:
-                    `**${formatarRobux(perfil.totalRobux)}**`,
-                inline: true
-            }
         );
+
+    // ======================================
+    // ESTATÍSTICAS LADO A LADO
+    // ======================================
+
+    embed.addFields(
+        {
+            name: 'Compras realizadas',
+            value: String(
+                perfil.quantidadeCompras || 0
+            ),
+            inline: true
+        },
+        {
+            name: 'Total gasto',
+            value: formatarDinheiro(
+                perfil.totalGasto
+            ),
+            inline: true
+        },
+        {
+            name: 'Robux comprados',
+            value:
+                `${formatarRobux(
+                    perfil.totalRobux
+                )} Robux`,
+            inline: true
+        }
+    );
+
+    // ======================================
+    // CARGO DO CLIENTE
+    // ======================================
+
+    embed.addFields(
+        {
+            name: 'Cargo atual',
+            value:
+                perfil.cargoAtualId
+                    ? `<@&${perfil.cargoAtualId}>`
+                    : 'Não atribuído',
+            inline: true
+        },
+        {
+            name: 'Cargo correspondente',
+            value:
+                perfil.cargoIdealId
+                    ? `<@&${perfil.cargoIdealId}>`
+                    : 'Não configurado',
+            inline: true
+        }
+    );
 
     // ======================================
     // PROGRESSO PARA O PRÓXIMO NÍVEL
@@ -403,25 +511,22 @@ function criarEmbedPerfil(
 
     if (perfil.proximoNivel) {
         embed.addFields({
-            name: '🚀 Próxima conquista',
-
+            name: 'Próxima conquista',
             value:
                 `${perfil.proximoNivel.emoji} ` +
                 `**${perfil.proximoNivel.nome}**\n` +
-                `Faltam **${formatarDinheiro(perfil.proximoNivel.falta)}** ` +
-                'em compras para alcançar esse nível.',
-
+                `Faltam **${formatarDinheiro(
+                    perfil.proximoNivel.falta
+                )}** em compras.`,
             inline: false
         });
 
     } else {
         embed.addFields({
-            name: '👑 Nível máximo',
-
+            name: 'Nível máximo',
             value:
-                'Você alcançou a classificação ' +
+                '👑 Você alcançou a classificação ' +
                 'máxima da InovareSale!',
-
             inline: false
         });
     }
@@ -431,15 +536,17 @@ function criarEmbedPerfil(
     // ======================================
 
     embed.addFields({
-        name: '📜 Últimas compras',
-
+        name: 'Últimas compras',
         value: formatarHistorico(
             perfil.historico,
-            5
+            CONFIG.limiteHistorico
         ),
-
         inline: false
     });
+
+    // ======================================
+    // RODAPÉ
+    // ======================================
 
     embed.setFooter({
         text:
@@ -466,8 +573,11 @@ function obterEstatisticasCliente(
 
     return {
         compras: dados.quantidadeCompras,
+
         gasto: dados.totalGasto,
+
         robux: dados.totalRobux,
+
         nivel: obterNivelCliente(
             dados.totalGasto
         ).nome
@@ -475,8 +585,11 @@ function obterEstatisticasCliente(
 }
 
 // ==========================================
-// EXPORTAR FUNÇÕES
+// EXPORTAÇÕES COMPATÍVEIS
 // ==========================================
+
+// Mantém os mesmos nomes usados
+// por outras partes do projeto.
 
 module.exports = {
     NIVEIS,

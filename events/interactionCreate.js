@@ -7,6 +7,33 @@ const {
     PermissionFlagsBits
 } = require('discord.js');
 
+// ==========================================
+// INOVARESALE BOT 3.0
+// ROTEADOR CENTRAL DE INTERAÇÕES
+// ==========================================
+//
+// Responsável por direcionar:
+//
+// - Comandos de barra (/)
+// - Botões de configuração
+// - Botões de tickets
+// - Formulários de tickets
+// - Avaliações por DM
+// - Painéis de Limiteds
+// - Compras de Limiteds
+// - Entregas de Limiteds
+//
+// Cada interação deve ser atendida
+// por apenas um handler.
+//
+// Componentes de outros sistemas
+// que possuem collectors próprios
+// não são interceptados.
+
+// ==========================================
+// HANDLERS
+// ==========================================
+
 const {
     handleSetupInteraction
 } = require('../handlers/setupHandler');
@@ -19,13 +46,18 @@ const {
     handleAvaliacaoInteraction
 } = require('../handlers/avaliacaoHandler');
 
+const {
+    handleLimitedsInteraction
+} = require('../handlers/limitedsHandler');
+
 // ==========================================
-// INOVARESALE BOT 2.0
-// ROTEADOR CENTRAL DE INTERACOES
+// COMANDOS ADMINISTRATIVOS
 // ==========================================
-// Cada botao, menu e modal deve ser atendido
-// por UM unico handler para evitar o erro
-// "Interaction has already been acknowledged".
+
+// Uma camada adicional de proteção.
+//
+// Cada comando também deve
+// validar suas próprias permissões.
 
 const COMANDOS_ADMIN = new Set([
     'setup',
@@ -33,39 +65,139 @@ const COMANDOS_ADMIN = new Set([
     'venda'
 ]);
 
-function pertenceAoSetup(id) {
-    return (
-        id.startsWith('setup_') ||
-        id.startsWith('modal_k_') ||
-        id === 'modal_estoque_preco'
-    );
+// ==========================================
+// IDENTIFICAR O HANDLER
+// ==========================================
+
+function identificarHandler(customId) {
+    if (
+        typeof customId !== 'string' ||
+        customId.length === 0
+    ) {
+        return null;
+    }
+
+    // ======================================
+    // SETUP ADMINISTRATIVO
+    // ======================================
+
+    if (
+        customId.startsWith('setup_') ||
+        customId.startsWith('modal_k_') ||
+        customId === 'modal_estoque_preco'
+    ) {
+        return {
+            nome: 'setup',
+            executar: handleSetupInteraction
+        };
+    }
+
+    // ======================================
+    // TICKETS E COMPRAS DE ROBUX
+    // ======================================
+
+    if (
+        customId.startsWith('ticket_')
+    ) {
+        return {
+            nome: 'tickets',
+            executar: handleTicketInteraction
+        };
+    }
+
+    // ======================================
+    // AVALIAÇÕES
+    // ======================================
+
+    if (
+        customId.startsWith('avaliacao_')
+    ) {
+        return {
+            nome: 'avaliacoes',
+            executar: handleAvaliacaoInteraction
+        };
+    }
+
+    // ======================================
+    // LIMITEDS
+    // ======================================
+
+    if (
+        customId.startsWith('limiteds_')
+    ) {
+        return {
+            nome: 'limiteds',
+            executar: handleLimitedsInteraction
+        };
+    }
+
+    return null;
 }
 
-function pertenceAosTickets(id) {
-    return id.startsWith('ticket_');
-}
+// ==========================================
+// RESPONDER ERRO DE FORMA SEGURA
+// ==========================================
 
-function pertenceAsAvaliacoes(id) {
-    return id.startsWith('avaliacao_');
-}
-
-async function responderErro(interaction, texto) {
+async function responderErro(
+    interaction,
+    mensagem
+) {
     const payload = {
-        content: texto,
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: { parse: [] }
+        content: mensagem,
+
+        allowedMentions: {
+            parse: []
+        }
     };
 
-    // Uma interacao ja respondida nao pode receber reply() novamente.
-    if (interaction.replied || interaction.deferred) {
-        await interaction.followUp(payload);
-    } else {
-        await interaction.reply(payload);
+    // Interação com deferReply:
+    // usar editReply evita tentar
+    // responder pela segunda vez.
+
+    if (interaction.deferred) {
+        return interaction.editReply(
+            payload
+        );
     }
+
+    // Interação já respondida:
+    // enviar uma mensagem adicional
+    // de forma privada.
+
+    if (interaction.replied) {
+        return interaction.followUp({
+            ...payload,
+
+            flags:
+                MessageFlags.Ephemeral
+        });
+    }
+
+    // Primeira resposta:
+    // manter privada.
+
+    return interaction.reply({
+        ...payload,
+
+        flags:
+            MessageFlags.Ephemeral
+    });
 }
 
-async function executarComando(interaction, client) {
-    const nome = interaction.commandName;
+// ==========================================
+// EXECUTAR COMANDO SLASH
+// ==========================================
+
+async function executarComando(
+    interaction,
+    client
+) {
+    const nome =
+        interaction.commandName;
+
+    // ======================================
+    // RESTRIÇÃO ADMINISTRATIVA
+    // ======================================
 
     if (
         COMANDOS_ADMIN.has(nome) &&
@@ -75,99 +207,142 @@ async function executarComando(interaction, client) {
     ) {
         await responderErro(
             interaction,
-            '❌ Apenas administradores podem utilizar esse comando.'
+
+            '❌ Apenas administradores podem ' +
+            'utilizar esse comando.'
         );
+
         return;
     }
 
-    const comando = client.commands?.get(nome);
+    // ======================================
+    // LOCALIZAR COMANDO
+    // ======================================
 
-    if (!comando || typeof comando.execute !== 'function') {
-        console.warn(`[InovareSale] Comando nao encontrado: /${nome}`);
+    const comando =
+        client.commands?.get(nome);
+
+    if (
+        !comando ||
+        typeof comando.execute !== 'function'
+    ) {
+        console.warn(
+            '[InovareSale] ' +
+            `Comando não encontrado: /${nome}`
+        );
 
         await responderErro(
             interaction,
-            '❌ Esse comando ainda não está disponível. Avise a equipe.'
+
+            '❌ Esse comando não está ' +
+            'disponível no momento.'
         );
+
         return;
     }
 
-    // Compativel com os comandos existentes, que recebem interaction.
-    // O argumento client e opcional para os comandos novos.
-    await comando.execute(interaction, client);
+    // ======================================
+    // EXECUTAR
+    // ======================================
+
+    // Mantemos o contrato anterior:
+    //
+    // comando.execute(interaction, client)
+    //
+    // Comandos que usam apenas
+    // interaction continuam
+    // funcionando normalmente.
+
+    await comando.execute(
+        interaction,
+        client
+    );
 }
 
-async function executarComponente(interaction) {
-    const id = interaction.customId;
+// ==========================================
+// EXECUTAR COMPONENTE
+// ==========================================
 
-    if (typeof id !== 'string' || id.length === 0) {
-        return;
-    }
+async function executarComponente(
+    interaction
+) {
+    const customId =
+        interaction.customId;
 
-    // ======================================
-    // 1. CONFIGURACOES ADMINISTRATIVAS
-    // ======================================
-
-    if (pertenceAoSetup(id)) {
-        const tratado = await handleSetupInteraction(interaction);
-
-        if (!tratado) {
-            await responderErro(
-                interaction,
-                '⚠️ Essa opção de configuração não está disponível.'
-            );
-        }
-
-        return;
-    }
+    const handler =
+        identificarHandler(
+            customId
+        );
 
     // ======================================
-    // 2. TICKETS E COMPRAS
+    // COMPONENTE NÃO GERENCIADO
     // ======================================
 
-    if (pertenceAosTickets(id)) {
-        const tratado = await handleTicketInteraction(interaction);
-
-        if (!tratado) {
-            await responderErro(
-                interaction,
-                '⚠️ Essa opção de compra não está disponível.'
-            );
-        }
-
-        return;
-    }
-
-    // ======================================
-    // 3. AVALIACOES DOS CLIENTES
-    // ======================================
-
-    if (pertenceAsAvaliacoes(id)) {
-        const tratado = await handleAvaliacaoInteraction(interaction);
-
-        if (!tratado) {
-            await responderErro(
-                interaction,
-                '⚠️ Essa opção de avaliação não está disponível.'
-            );
-        }
-
-        return;
-    }
-
-    // ======================================
-    // 4. ESTOQUE E OUTROS COLLECTORS
-    // ======================================
+    // Não respondemos a componentes
+    // desconhecidos.
     //
-    // Os botoes "estoque_v2_*" do comando
-    // /estoque continuam sob o collector
-    // de commands/estoque.js.
+    // Eles podem pertencer a um
+    // collector de outro comando.
     //
-    // Nao responder aqui, pois isso causaria
-    // duas respostas ao mesmo clique.
+    // Exemplos:
     //
-    // Componentes de outros comandos tambem
-    // podem possuir seus proprios collectors.
+    // estoque_v2_*
+    //
+    // Responder aqui causaria
+    // "Interaction has already
+    // been acknowledged".
+
+    if (!handler) {
+        return false;
+    }
+
+    // ======================================
+    // DIRECIONAR AO HANDLER CORRETO
+    // ======================================
+
+    const tratado =
+        await handler.executar(
+            interaction
+        );
+
+    // ======================================
+    // HANDLER NÃO RECONHECEU A AÇÃO
+    // ======================================
+
+    // Só mostramos a mensagem de erro
+    // quando a interação pertence
+    // claramente a um dos prefixos
+    // gerenciados por este roteador.
+
+    if (!tratado) {
+        await responderErro(
+            interaction,
+
+            '⚠️ Esta opção não está disponível ' +
+            'ou pertence a uma versão antiga ' +
+            'do painel.'
+        );
+    }
+
+    return true;
+}
+
+// ==========================================
+// IDENTIFICAR COMPONENTES DO DISCORD
+// ==========================================
+
+function ehInteracaoDeComponente(
+    interaction
+) {
+    return Boolean(
+        interaction.isButton?.() ||
+        interaction.isStringSelectMenu?.() ||
+        interaction.isChannelSelectMenu?.() ||
+        interaction.isRoleSelectMenu?.() ||
+        interaction.isUserSelectMenu?.() ||
+        interaction.isMentionableSelectMenu?.() ||
+        interaction.isModalSubmit?.()
+    );
 }
 
 // ==========================================
@@ -175,55 +350,78 @@ async function executarComponente(interaction) {
 // ==========================================
 
 module.exports = {
-    name: Events.InteractionCreate,
+    name:
+        Events.InteractionCreate,
 
-    async execute(interaction, client) {
-        const bot = client || interaction.client;
+    async execute(
+        interaction,
+        client
+    ) {
+        const bot =
+            client ||
+            interaction.client;
 
         try {
             // ==================================
-            // COMANDOS DE BARRA (/)
+            // COMANDOS SLASH
             // ==================================
 
-            if (interaction.isChatInputCommand()) {
-                await executarComando(interaction, bot);
+            if (
+                interaction.isChatInputCommand()
+            ) {
+                await executarComando(
+                    interaction,
+                    bot
+                );
+
                 return;
             }
 
             // ==================================
-            // BOTOES, MENUS E FORMULARIOS
+            // BOTÕES, MENUS E MODAIS
             // ==================================
 
             if (
-                interaction.isButton() ||
-                interaction.isStringSelectMenu() ||
-                interaction.isChannelSelectMenu() ||
-                interaction.isRoleSelectMenu() ||
-                interaction.isModalSubmit()
+                ehInteracaoDeComponente(
+                    interaction
+                )
             ) {
-                await executarComponente(interaction);
+                await executarComponente(
+                    interaction
+                );
+
+                return;
             }
+
+            // ==================================
+            // OUTROS TIPOS DE INTERAÇÃO
+            // ==================================
+
+            // Interações não reconhecidas
+            // são ignoradas para não
+            // interferir em outros
+            // listeners ou collectors.
 
         } catch (erro) {
             console.error(
-                '[InovareSale] Erro em interactionCreate:',
+                '[InovareSale Bot 3.0] ' +
+                'Erro em interactionCreate:',
                 erro
             );
-
-            // ==================================
-            // RESPONDER ERRO SEM TRAVAR O BOT
-            // ==================================
 
             try {
                 await responderErro(
                     interaction,
-                    '❌ Ocorreu um erro ao processar sua ação. ' +
-                    'Tente novamente ou avise a equipe.'
+
+                    '❌ Ocorreu um erro ao processar ' +
+                    'sua ação. Tente novamente ' +
+                    'ou avise a equipe.'
                 );
 
             } catch (erroResposta) {
                 console.error(
-                    '[InovareSale] Falha ao informar erro da interação:',
+                    '[InovareSale Bot 3.0] ' +
+                    'Falha ao responder interação:',
                     erroResposta
                 );
             }

@@ -1,8 +1,13 @@
 
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
 const {
     SlashCommandBuilder,
     PermissionFlagsBits,
     EmbedBuilder,
+    AttachmentBuilder,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
@@ -12,70 +17,81 @@ const {
     MessageFlags
 } = require('discord.js');
 
-const {
-    getConfig,
-    saveConfig
-} = require('../utils/storage');
+const { getConfig, saveConfig } = require('../utils/storage');
+
+const COR = 0x9951CB;
+const TITULO = 'INOVARESALE | ESTOQUE';
+const PREFIXO = 'estoque_v2_';
+
+const BANNER = path.join(
+    __dirname,
+    '..',
+    'assets',
+    'banner.png'
+);
 
 // ==========================================
-// FORMATAR QUANTIDADE
+// INTERPRETAR QUANTIDADE DE ROBUX
 // ==========================================
 
 function interpretarQuantidade(texto) {
-    let valor = String(texto)
+    const entrada = String(texto || '')
         .trim()
         .toLowerCase()
         .replace(/\s/g, '');
 
-    if (valor.endsWith('k')) {
-        const numero = Number(
-            valor.slice(0, -1).replace(',', '.')
-        );
+    if (!entrada) return null;
 
-        if (!Number.isFinite(numero) || numero <= 0) {
-            return null;
-        }
+    let quantidade;
 
-        return Math.floor(numero * 1000);
-    }
-
-    if (!/^[\d.,]+$/.test(valor)) {
+    if (/^\d+(?:[.,]\d+)?k$/.test(entrada)) {
+        quantidade =
+            Number(entrada.slice(0, -1).replace(',', '.')) * 1000;
+    } else if (/^\d{1,3}(?:\.\d{3})+$/.test(entrada)) {
+        quantidade = Number(entrada.replace(/\./g, ''));
+    } else if (/^\d+$/.test(entrada)) {
+        quantidade = Number(entrada);
+    } else {
         return null;
     }
 
-    valor = valor.replace(/\./g, '').replace(',', '.');
-
-    const numero = Number(valor);
-
-    if (!Number.isFinite(numero) || numero <= 0) {
+    if (
+        !Number.isSafeInteger(Math.floor(quantidade)) ||
+        quantidade < 1
+    ) {
         return null;
     }
 
-    return Math.floor(numero);
+    return Math.floor(quantidade);
 }
 
 function formatarQuantidade(valor) {
-    return Number(valor).toLocaleString('pt-BR');
+    return Number(valor || 0).toLocaleString('pt-BR');
 }
 
 function formatarK(valor) {
-    return `K${Number(valor).toLocaleString('pt-BR', {
+    return `K${Number(valor || 0).toLocaleString('pt-BR', {
         maximumFractionDigits: 2
     })}`;
 }
 
 // ==========================================
-// IDENTIFICAR MENSAGENS DE ESTOQUE
+// IDENTIFICAR PUBLICAÇÕES DE ESTOQUE
 // ==========================================
 
-function ehMensagemDeEstoque(mensagem, botId) {
-    if (mensagem.author.id !== botId) {
+function ehMensagemEstoque(mensagem, botId) {
+    if (mensagem.author?.id !== botId) {
         return false;
     }
 
     const texto = mensagem.content || '';
 
+    const titulos = (mensagem.embeds || []).map(
+        embed => embed.title || ''
+    );
+
     return (
+        titulos.some(titulo => titulo.includes(TITULO)) ||
         texto.includes('𝐋𝐎𝐉𝐀 𝐎𝐍') ||
         texto.includes('𝐋𝐎𝐉𝐀 𝐎𝐅𝐅') ||
         texto.includes('LOJA ON!') ||
@@ -85,214 +101,384 @@ function ehMensagemDeEstoque(mensagem, botId) {
 }
 
 // ==========================================
-// ENCONTRAR ÚLTIMA PUBLICAÇÃO
+// LOCALIZAR ÚLTIMA PUBLICAÇÃO
 // ==========================================
 
 async function buscarUltimaMensagem(canal, config, botId) {
-    const idSalvo = config.estoque?.ultimaMensagemId;
+    const id = config.estoque?.ultimaMensagemId;
 
-    if (idSalvo) {
+    if (id) {
         try {
-            const mensagem = await canal.messages.fetch(idSalvo);
+            const mensagem = await canal.messages.fetch(id);
 
             if (mensagem.author.id === botId) {
                 return mensagem;
             }
         } catch (erro) {
-            console.log(
-                'Última publicação não encontrada pelo ID.'
+            console.warn(
+                '[Estoque] Mensagem anterior não encontrada:',
+                erro.message
             );
         }
     }
 
-    // Compatibilidade com mensagens publicadas
-    // antes desta atualização.
     const mensagens = await canal.messages.fetch({
         limit: 100
     });
 
-    return mensagens.find(
-        mensagem => ehMensagemDeEstoque(mensagem, botId)
-    ) || null;
+    return (
+        mensagens.find(
+            mensagem => ehMensagemEstoque(mensagem, botId)
+        ) || null
+    );
 }
 
 // ==========================================
-// CRIAR TEXTO DO ESTOQUE
+// CRIAR PUBLICAÇÃO DO ESTOQUE 3.0
 // ==========================================
 
-function criarTextoEstoque(config) {
-    const estoque = config.estoque;
+function criarPublicacao(config) {
+    const estoque = config.estoque || {};
 
-    if (estoque.status === 'OFF') {
-        return (
-            '🔴 **𝐋𝐎𝐉𝐀 𝐎𝐅𝐅!**\n\n' +
-            '📦 No momento, nossas vendas estão ' +
-            'temporariamente pausadas.\n\n' +
-            '🔔 Assim que o estoque estiver disponível ' +
-            'novamente, avisaremos por aqui.\n\n' +
-            '💎 **InovareSale • Sua loja de Robux**'
+    const ativo =
+        String(estoque.status || '').toUpperCase() === 'ON';
+
+    const embed = new EmbedBuilder()
+        .setColor(ativo ? COR : 0x6D6476)
+        .setTitle(TITULO)
+        .setFooter({
+            text: 'InovareSale • Central de estoque'
+        })
+        .setTimestamp();
+
+    if (ativo) {
+        embed.setDescription(
+            'Nossa loja está recebendo pedidos! ' +
+            'Confira a disponibilidade e acesse a central de compras.'
+        );
+
+        embed.addFields(
+            {
+                name: 'Status',
+                value: '🟢 Loja ON',
+                inline: true
+            },
+            {
+                name: 'Disponível',
+                value:
+                    `${formatarQuantidade(estoque.quantidade)} Robux`,
+                inline: true
+            },
+            {
+                name: 'Preço por K',
+                value: formatarK(estoque.precoK ?? 39),
+                inline: true
+            }
+        );
+
+        embed.addFields({
+            name: 'Fazer pedido',
+            value: estoque.canalCompraId
+                ? `Acesse <#${estoque.canalCompraId}> para iniciar sua compra.`
+                : 'Consulte a Central de Pedidos do servidor.',
+            inline: false
+        });
+    } else {
+        embed.setDescription(
+            'As vendas estão temporariamente pausadas. ' +
+            'Avisaremos por aqui quando o estoque ' +
+            'estiver disponível novamente.'
+        );
+
+        embed.addFields({
+            name: 'Status',
+            value: '🔴 Loja OFF',
+            inline: true
+        });
+    }
+
+    // Banner original da InovareSale.
+    const arquivos = [];
+
+    try {
+        if (
+            fs.existsSync(BANNER) &&
+            fs.statSync(BANNER).size > 0
+        ) {
+            arquivos.push(
+                new AttachmentBuilder(BANNER, {
+                    name: 'banner.png'
+                })
+            );
+
+            embed.setImage(
+                'attachment://banner.png'
+            );
+        }
+    } catch (erro) {
+        console.warn(
+            '[Estoque] Banner não pôde ser anexado:',
+            erro.message
         );
     }
 
-    const quantidade = formatarQuantidade(
-        estoque.quantidade
-    );
-
-    const preco = formatarK(
-        estoque.precoK ?? 39
-    );
-
-    const canalCompra = estoque.canalCompraId
-        ? `<#${estoque.canalCompraId}>`
-        : 'Canal não configurado';
-
-    return (
-        '🟢 **𝐋𝐎𝐉𝐀 𝐎𝐍!**\n\n' +
-        `📦 **𝐄𝐬𝐭𝐨𝐪𝐮𝐞 𝐝𝐢𝐬𝐩𝐨𝐧𝐢́𝐯𝐞𝐥:** ${quantidade} Robux\n\n` +
-        `💸 **𝐏𝐫𝐞𝐜̧𝐨:** ${preco}\n\n` +
-        '**𝐏𝐚𝐫𝐚 𝐜𝐨𝐦𝐩𝐫𝐚𝐫, 𝐚𝐜𝐞𝐬𝐬𝐞:**\n' +
-        `${canalCompra}\n\n` +
-        '💬 **Dúvidas podem ser tratadas ' +
-        'no ticket de compra.**\n\n' +
-        '⚠️ **Pagamento somente após autorização ' +
-        'da equipe.**\n\n' +
-        '💎 **InovareSale • Sua loja de Robux**'
-    );
+    return {
+        embeds: [embed],
+        files: arquivos,
+        allowedMentions: {
+            parse: []
+        }
+    };
 }
 
 // ==========================================
-// PUBLICAR E SUBSTITUIR ESTOQUE
+// PUBLICAR E SUBSTITUIR ESTOQUE ANTIGO
 // ==========================================
 
 async function publicarEstoque(guild, client, config) {
-    const canal = await guild.channels.fetch(
-        config.estoque.canalId
-    );
+    const canalId = config.estoque?.canalId;
+
+    if (!canalId) {
+        throw new Error(
+            'Canal de estoque não configurado.'
+        );
+    }
+
+    const canal = await guild.channels.fetch(canalId);
 
     if (
-        !canal ||
-        !canal.isTextBased() ||
-        !canal.messages
+        !canal?.isTextBased() ||
+        !canal.messages ||
+        typeof canal.send !== 'function'
     ) {
         throw new Error(
             'Canal de estoque inválido ou inacessível.'
         );
     }
 
-    // Primeiro publica a mensagem nova.
-    const mensagemNova = await canal.send({
-        content: criarTextoEstoque(config),
-        allowedMentions: {
-            parse: []
-        }
-    });
+    // Primeiro publica o novo anúncio.
+    const nova = await canal.send(
+        criarPublicacao(config)
+    );
 
-    // Salva o ID antes de tentar limpar as antigas.
-    const idAnterior = config.estoque.ultimaMensagemId;
+    // Guarda o ID da nova publicação.
+    const idAnterior =
+        config.estoque.ultimaMensagemId;
 
-    config.estoque.ultimaMensagemId = mensagemNova.id;
+    config.estoque.ultimaMensagemId = nova.id;
+
     saveConfig(config);
 
+    // Localiza publicações antigas.
     const antigas = new Map();
 
-    if (idAnterior && idAnterior !== mensagemNova.id) {
+    if (
+        idAnterior &&
+        idAnterior !== nova.id
+    ) {
         try {
-            const anterior = await canal.messages.fetch(
+            const antiga = await canal.messages.fetch(
                 idAnterior
             );
 
-            if (anterior.author.id === client.user.id) {
-                antigas.set(anterior.id, anterior);
+            if (antiga.author.id === client.user.id) {
+                antigas.set(antiga.id, antiga);
             }
-        } catch (erro) {
+        } catch (_) {
             // A mensagem antiga pode ter sido apagada.
         }
     }
 
-    // Procura também publicações antigas realizadas
-    // antes de existir a configuração ultimaMensagemId.
     try {
-        const recentes = await canal.messages.fetch({
+        const mensagens = await canal.messages.fetch({
             limit: 100
         });
 
-        for (const mensagem of recentes.values()) {
+        for (const mensagem of mensagens.values()) {
             if (
-                mensagem.id !== mensagemNova.id &&
-                ehMensagemDeEstoque(
+                mensagem.id !== nova.id &&
+                ehMensagemEstoque(
                     mensagem,
                     client.user.id
                 )
             ) {
-                antigas.set(mensagem.id, mensagem);
+                antigas.set(
+                    mensagem.id,
+                    mensagem
+                );
             }
         }
     } catch (erro) {
-        console.error(
-            'Erro ao localizar estoques antigos:',
-            erro
+        console.warn(
+            '[Estoque] Não foi possível listar anúncios antigos:',
+            erro.message
         );
     }
 
+    // Remove publicações anteriores.
     for (const mensagem of antigas.values()) {
         try {
             await mensagem.delete();
         } catch (erro) {
-            console.error(
-                'Não foi possível apagar estoque antigo:',
-                erro
+            console.warn(
+                '[Estoque] Não foi possível apagar anúncio antigo:',
+                erro.message
             );
         }
     }
 
-    return mensagemNova;
+    return nova;
 }
 
 // ==========================================
-// CRIAR MODAL DE QUANTIDADE
+// MODAL: ATUALIZAR QUANTIDADE
 // ==========================================
 
 function criarModalQuantidade() {
     const modal = new ModalBuilder()
-        .setCustomId('estoque_v2_quantidade')
-        .setTitle('Estoque disponível');
+        .setCustomId(`${PREFIXO}quantidade`)
+        .setTitle('Atualizar estoque');
 
-    const input = new TextInputBuilder()
+    const quantidade = new TextInputBuilder()
         .setCustomId('quantidade')
-        .setLabel('Quantos Robux temos em estoque?')
-        .setPlaceholder('Exemplo: 5000 ou 5k')
+        .setLabel('Quantidade de Robux disponível')
+        .setPlaceholder('Ex.: 5000 ou 5k')
         .setStyle(TextInputStyle.Short)
+        .setMaxLength(24)
         .setRequired(true);
 
     modal.addComponents(
-        new ActionRowBuilder().addComponents(input)
+        new ActionRowBuilder().addComponents(quantidade)
     );
 
     return modal;
 }
 
 // ==========================================
-// CRIAR MODAL DE EDIÇÃO
+// MODAL: EDITAR PUBLICAÇÃO
 // ==========================================
 
-function criarModalEdicao(textoAtual) {
+function criarModalEdicao(texto) {
     const modal = new ModalBuilder()
-        .setCustomId('estoque_v2_editar')
-        .setTitle('Editar última publicação');
+        .setCustomId(`${PREFIXO}editar`)
+        .setTitle('Editar anúncio de estoque');
 
-    const input = new TextInputBuilder()
+    const mensagem = new TextInputBuilder()
         .setCustomId('mensagem')
-        .setLabel('Texto da publicação')
+        .setLabel('Descrição do anúncio')
         .setStyle(TextInputStyle.Paragraph)
         .setMaxLength(2000)
-        .setRequired(true)
-        .setValue(textoAtual.slice(0, 2000));
+        .setRequired(true);
+
+    if (texto) {
+        mensagem.setValue(
+            String(texto).slice(0, 2000)
+        );
+    }
 
     modal.addComponents(
-        new ActionRowBuilder().addComponents(input)
+        new ActionRowBuilder().addComponents(mensagem)
     );
 
     return modal;
+}
+
+// ==========================================
+// PAINEL ADMINISTRATIVO DE ESTOQUE
+// ==========================================
+
+function criarPainel(config) {
+    const estoque = config.estoque || {};
+
+    const ativo =
+        String(estoque.status || '').toUpperCase() === 'ON';
+
+    const embed = new EmbedBuilder()
+        .setColor(COR)
+        .setTitle('INOVARESALE | GERENCIAR ESTOQUE')
+        .setDescription(
+            'Controle a disponibilidade e a ' +
+            'publicação do estoque da loja.'
+        )
+        .addFields(
+            {
+                name: 'Status atual',
+                value: ativo
+                    ? '🟢 Loja ON'
+                    : '🔴 Loja OFF',
+                inline: true
+            },
+            {
+                name: 'Quantidade',
+                value:
+                    `${formatarQuantidade(estoque.quantidade)} Robux`,
+                inline: true
+            },
+            {
+                name: 'Preço por K',
+                value: formatarK(
+                    estoque.precoK ?? 39
+                ),
+                inline: true
+            }
+        )
+        .setFooter({
+            text: 'Uma nova publicação substitui a anterior.'
+        });
+
+    const botoes = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`${PREFIXO}on`)
+            .setLabel('Loja ON')
+            .setEmoji('🟢')
+            .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+            .setCustomId(`${PREFIXO}off`)
+            .setLabel('Loja OFF')
+            .setEmoji('🔴')
+            .setStyle(ButtonStyle.Danger),
+
+        new ButtonBuilder()
+            .setCustomId(`${PREFIXO}editar_botao`)
+            .setLabel('Editar anúncio')
+            .setEmoji('✏️')
+            .setStyle(ButtonStyle.Secondary)
+    );
+
+    return {
+        embeds: [embed],
+        components: [botoes]
+    };
+}
+
+// ==========================================
+// TRATAMENTO DE ERROS
+// ==========================================
+
+async function respostaErro(interaction, mensagem) {
+    try {
+        if (
+            interaction.deferred ||
+            interaction.replied
+        ) {
+            await interaction.editReply({
+                content: mensagem,
+                embeds: [],
+                components: []
+            });
+        } else {
+            await interaction.reply({
+                content: mensagem,
+                flags: MessageFlags.Ephemeral
+            });
+        }
+    } catch (erro) {
+        console.error(
+            '[Estoque] Erro ao informar falha:',
+            erro
+        );
+    }
 }
 
 // ==========================================
@@ -303,97 +489,81 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('estoque')
         .setDescription(
-            'Gerencia o status e o estoque da InovareSale.'
+            'Gerencie o estoque da InovareSale.'
         )
         .setDefaultMemberPermissions(
             PermissionFlagsBits.Administrator
         ),
 
     async execute(interaction, client) {
+        if (
+            !interaction.inGuild() ||
+            !interaction.memberPermissions?.has(
+                PermissionFlagsBits.Administrator
+            )
+        ) {
+            await interaction.reply({
+                content:
+                    'Você não tem permissão para usar este comando.',
+                flags: MessageFlags.Ephemeral
+            });
+
+            return;
+        }
+
+        const bot = client || interaction.client;
         const config = getConfig();
 
         if (!config.estoque?.canalId) {
-            return interaction.reply({
+            await interaction.reply({
                 content:
-                    '❌ Configure o canal de estoque no `/setup`.',
+                    'Configure o canal de estoque pelo ' +
+                    '`/setup` antes de continuar.',
                 flags: MessageFlags.Ephemeral
             });
+
+            return;
         }
 
-        const embed = new EmbedBuilder()
-            .setColor(0xC0C0C0)
-            .setTitle('📦 Estoque — InovareSale')
-            .setDescription(
-                'Gerencie a publicação de estoque da loja.\n\n' +
-                '🟢 **Loja ON:** informa uma quantidade ' +
-                'e publica o estoque disponível.\n\n' +
-                '🔴 **Loja OFF:** informa que as vendas ' +
-                'estão pausadas.\n\n' +
-                '✏️ **Editar última:** altera diretamente ' +
-                'o texto da publicação atual.\n\n' +
-                'Uma nova publicação substitui as anteriores.'
-            )
-            .setFooter({
-                text: 'InovareSale • Gerenciamento de Estoque'
-            });
-
-        const botoes = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId('estoque_v2_on')
-                    .setLabel('Loja ON')
-                    .setEmoji('🟢')
-                    .setStyle(ButtonStyle.Success),
-
-                new ButtonBuilder()
-                    .setCustomId('estoque_v2_off')
-                    .setLabel('Loja OFF')
-                    .setEmoji('🔴')
-                    .setStyle(ButtonStyle.Danger),
-
-                new ButtonBuilder()
-                    .setCustomId('estoque_v2_editar_botao')
-                    .setLabel('Editar última')
-                    .setEmoji('✏️')
-                    .setStyle(ButtonStyle.Secondary)
-            );
-
         await interaction.reply({
-            embeds: [embed],
-            components: [botoes],
+            ...criarPainel(config),
             flags: MessageFlags.Ephemeral
         });
 
         const painel = await interaction.fetchReply();
 
         const collector = painel.createMessageComponentCollector({
-            filter: i => i.user.id === interaction.user.id,
+            filter: i =>
+                i.user.id === interaction.user.id &&
+                i.customId.startsWith(PREFIXO),
             time: 120000,
             max: 1
         });
 
         collector.on('collect', async i => {
             try {
-                // ==============================
-                // LOJA OFF
-                // ==============================
 
-                if (i.customId === 'estoque_v2_off') {
+                // ==================================
+                // LOJA OFF
+                // ==================================
+
+                if (i.customId === `${PREFIXO}off`) {
                     await i.deferUpdate();
 
                     const atual = getConfig();
+
                     atual.estoque.status = 'OFF';
                     atual.estoque.quantidade = 0;
 
                     await publicarEstoque(
                         interaction.guild,
-                        client,
+                        bot,
                         atual
                     );
 
                     await interaction.editReply({
                         content:
-                            '✅ Loja OFF! A publicação anterior foi substituída.',
+                            '✅ Loja OFF! A publicação foi atualizada.',
                         embeds: [],
                         components: []
                     });
@@ -401,70 +571,93 @@ module.exports = {
                     return;
                 }
 
-                // ==============================
+                // ==================================
                 // LOJA ON
-                // ==============================
+                // ==================================
 
-                if (i.customId === 'estoque_v2_on') {
+                if (i.customId === `${PREFIXO}on`) {
                     await i.showModal(
                         criarModalQuantidade()
                     );
 
-                    const resposta = await i.awaitModalSubmit({
-                        filter: modal =>
-                            modal.customId === 'estoque_v2_quantidade' &&
-                            modal.user.id === interaction.user.id,
-                        time: 120000
-                    });
+                    let modal;
 
-                    await resposta.deferReply({
+                    try {
+                        modal = await i.awaitModalSubmit({
+                            filter: m =>
+                                m.customId === `${PREFIXO}quantidade` &&
+                                m.user.id === interaction.user.id,
+                            time: 120000
+                        });
+                    } catch (_) {
+                        // Usuário fechou o modal.
+                        return;
+                    }
+
+                    await modal.deferReply({
                         flags: MessageFlags.Ephemeral
                     });
 
                     const quantidade = interpretarQuantidade(
-                        resposta.fields.getTextInputValue(
+                        modal.fields.getTextInputValue(
                             'quantidade'
                         )
                     );
 
                     if (!quantidade) {
-                        await resposta.editReply({
+                        await modal.editReply({
                             content:
-                                '❌ Quantidade inválida. Use `5000` ou `5k`.'
+                                '❌ Quantidade inválida. ' +
+                                'Informe `5000` ou `5k`.'
                         });
+
                         return;
                     }
 
-                    const atual = getConfig();
+                    try {
+                        const atual = getConfig();
 
-                    atual.estoque.status = 'ON';
-                    atual.estoque.quantidade = quantidade;
+                        atual.estoque.status = 'ON';
+                        atual.estoque.quantidade = quantidade;
 
-                    await publicarEstoque(
-                        interaction.guild,
-                        client,
-                        atual
-                    );
+                        await publicarEstoque(
+                            interaction.guild,
+                            bot,
+                            atual
+                        );
 
-                    await resposta.editReply({
-                        content:
-                            `✅ Loja ON! Estoque publicado: **${formatarQuantidade(quantidade)} Robux**.`
-                    });
+                        await modal.editReply({
+                            content:
+                                `✅ Loja ON! ` +
+                                `${formatarQuantidade(quantidade)} Robux publicados.`
+                        });
 
-                    await interaction.editReply({
-                        components: []
-                    });
+                        await interaction.editReply({
+                            components: []
+                        });
+                    } catch (erro) {
+                        console.error(
+                            '[Estoque] Falha ao ativar loja:',
+                            erro
+                        );
+
+                        await modal.editReply({
+                            content:
+                                '❌ Não foi possível publicar o estoque. ' +
+                                'Verifique o canal e as permissões.'
+                        });
+                    }
 
                     return;
                 }
 
-                // ==============================
-                // EDITAR ÚLTIMA PUBLICAÇÃO
-                // ==============================
+                // ==================================
+                // EDITAR ÚLTIMO ANÚNCIO
+                // ==================================
 
                 if (
                     i.customId ===
-                    'estoque_v2_editar_botao'
+                    `${PREFIXO}editar_botao`
                 ) {
                     const atual = getConfig();
 
@@ -474,97 +667,161 @@ module.exports = {
                         );
 
                     if (
-                        !canal ||
-                        !canal.isTextBased() ||
+                        !canal?.isTextBased() ||
                         !canal.messages
                     ) {
                         await i.update({
                             content:
-                                '❌ Canal de estoque não encontrado.',
+                                '❌ Canal de estoque indisponível.',
                             embeds: [],
                             components: []
                         });
+
                         return;
                     }
 
-                    const mensagem = await buscarUltimaMensagem(
-                        canal,
-                        atual,
-                        client.user.id
-                    );
+                    const mensagem =
+                        await buscarUltimaMensagem(
+                            canal,
+                            atual,
+                            bot.user.id
+                        );
 
                     if (!mensagem) {
                         await i.update({
                             content:
-                                '❌ Ainda não existe publicação de estoque para editar.',
+                                '❌ Ainda não há publicação para editar.',
                             embeds: [],
                             components: []
                         });
+
                         return;
                     }
 
+                    // Compatível com embeds novos
+                    // e mensagens antigas de texto.
+                    const original =
+                        mensagem.embeds[0]?.title?.includes(TITULO)
+                            ? (
+                                mensagem.embeds[0].description ||
+                                ''
+                            )
+                            : (
+                                mensagem.content ||
+                                ''
+                            );
+
                     await i.showModal(
-                        criarModalEdicao(mensagem.content)
+                        criarModalEdicao(original)
                     );
 
-                    const resposta = await i.awaitModalSubmit({
-                        filter: modal =>
-                            modal.customId === 'estoque_v2_editar' &&
-                            modal.user.id === interaction.user.id,
-                        time: 120000
-                    });
+                    let modal;
 
-                    await resposta.deferReply({
+                    try {
+                        modal = await i.awaitModalSubmit({
+                            filter: m =>
+                                m.customId === `${PREFIXO}editar` &&
+                                m.user.id === interaction.user.id,
+                            time: 120000
+                        });
+                    } catch (_) {
+                        return;
+                    }
+
+                    await modal.deferReply({
                         flags: MessageFlags.Ephemeral
                     });
 
-                    const novoTexto = resposta.fields
+                    const texto = modal.fields
                         .getTextInputValue('mensagem')
                         .trim();
 
-                    if (!novoTexto) {
-                        await resposta.editReply({
-                            content: '❌ A mensagem não pode ficar vazia.'
+                    if (!texto) {
+                        await modal.editReply({
+                            content:
+                                '❌ A descrição não pode ficar vazia.'
                         });
+
                         return;
                     }
 
-                    await mensagem.edit({
-                        content: novoTexto,
-                        allowedMentions: {
-                            parse: []
+                    try {
+                        if (
+                            mensagem.embeds[0]?.title?.includes(
+                                TITULO
+                            )
+                        ) {
+                            const embed = EmbedBuilder.from(
+                                mensagem.embeds[0]
+                            );
+
+                            embed.setDescription(texto);
+
+                            await mensagem.edit({
+                                embeds: [embed],
+                                allowedMentions: {
+                                    parse: []
+                                }
+                            });
+                        } else {
+                            await mensagem.edit({
+                                content: texto,
+                                allowedMentions: {
+                                    parse: []
+                                }
+                            });
                         }
-                    });
 
-                    atual.estoque.ultimaMensagemId =
-                        mensagem.id;
+                        atual.estoque.ultimaMensagemId =
+                            mensagem.id;
 
-                    saveConfig(atual);
+                        saveConfig(atual);
 
-                    await resposta.editReply({
-                        content:
-                            '✅ Última publicação editada com sucesso!'
-                    });
+                        await modal.editReply({
+                            content:
+                                '✅ Publicação editada com sucesso!'
+                        });
 
-                    await interaction.editReply({
-                        components: []
-                    });
+                        await interaction.editReply({
+                            components: []
+                        });
+                    } catch (erro) {
+                        console.error(
+                            '[Estoque] Erro ao editar anúncio:',
+                            erro
+                        );
+
+                        await modal.editReply({
+                            content:
+                                '❌ Não foi possível editar a publicação.'
+                        });
+                    }
                 }
 
             } catch (erro) {
                 console.error(
-                    'Erro no comando /estoque:',
+                    '[Estoque] Erro no comando:',
                     erro
                 );
 
-                try {
-                    await interaction.editReply({
-                        content:
-                            '❌ Ocorreu um erro ao atualizar o estoque. Verifique os logs.',
-                        embeds: [],
-                        components: []
-                    });
-                } catch {}
+                if (
+                    !i.replied &&
+                    !i.deferred
+                ) {
+                    try {
+                        await i.reply({
+                            content:
+                                '❌ Não foi possível concluir essa ação.',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    } catch (_) {}
+                }
+
+                await respostaErro(
+                    interaction,
+                    '❌ Não foi possível atualizar o estoque. ' +
+                    'Verifique as permissões do bot.'
+                );
             }
         });
 
@@ -573,7 +830,7 @@ module.exports = {
                 await interaction.editReply({
                     components: []
                 });
-            } catch {}
+            } catch (_) {}
         });
     }
 };

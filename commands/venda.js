@@ -1,422 +1,767 @@
 
+'use strict';
+
 const {
     SlashCommandBuilder,
     PermissionFlagsBits,
-    MessageFlags
+    MessageFlags,
+    EmbedBuilder
 } = require('discord.js');
 
 const {
-    registrarVenda
+    registrarVenda,
+    formatarDinheiro,
+    formatarRobux
 } = require('../services/vendaService');
 
 // ==========================================
-// FORMATAÇÃO
+// INOVARESALE BOT 3.0
+// COMANDO /VENDA
 // ==========================================
 
-function formatarDinheiro(valor) {
-    return Number(valor || 0).toLocaleString(
-        'pt-BR',
-        {
-            style: 'currency',
-            currency: 'BRL'
+// FUNCIONALIDADES:
+//
+// - Registrar vendas manualmente
+// - Permitir uso apenas por administradores
+// - Identificar o cliente
+// - Registrar valor pago em reais
+// - Registrar quantidade de Robux
+// - Preservar histórico das compras
+// - Atualizar o perfil do cliente
+// - Atualizar cargos de fidelidade
+// - Publicar anúncio no canal de vendas
+// - Registrar a ação nos logs
+// - Impedir duplicidade da mesma interação
+// - Responder privadamente ao administrador
+//
+// IMPORTANTE:
+//
+// Não registra vendas de ticket.
+//
+// Este comando é usado para vendas
+// adicionadas manualmente pela equipe.
+//
+// O vendaService.js cuida do SQLite,
+// dos cargos e da publicação.
+//
+// Não executar operações financeiras
+// diretamente neste arquivo.
+
+// ==========================================
+// CONFIGURAÇÕES
+// ==========================================
+
+const COR = 0x9951CB;
+
+const VALOR_MAXIMO = 10000000;
+
+const ROBUX_MAXIMO = 50000000;
+
+// ==========================================
+// ERROS CONTROLADOS
+// ==========================================
+
+class ErroVenda extends Error {
+    constructor(mensagem) {
+        super(mensagem);
+
+        this.name = 'ErroVenda';
+    }
+}
+
+// ==========================================
+// RESPONDER PRIVADAMENTE
+// ==========================================
+
+async function responderPrivado(
+    interaction,
+    conteudo
+) {
+    const dados =
+        typeof conteudo === 'string'
+            ? {
+                content: conteudo
+            }
+            : conteudo;
+
+    const payload = {
+        ...dados,
+
+        allowedMentions: {
+            parse: []
         }
-    );
+    };
+
+    if (interaction.deferred) {
+        return interaction.editReply(
+            payload
+        );
+    }
+
+    if (interaction.replied) {
+        return interaction.followUp({
+            ...payload,
+
+            flags:
+                MessageFlags.Ephemeral
+        });
+    }
+
+    return interaction.reply({
+        ...payload,
+
+        flags:
+            MessageFlags.Ephemeral
+    });
 }
 
-function formatarRobux(valor) {
-    return Number(valor || 0).toLocaleString(
-        'pt-BR'
+// ==========================================
+// VERIFICAR PERMISSÃO
+// ==========================================
+
+// Mesmo que o interactionCreate.js
+// já verifique os administradores,
+// mantemos a proteção aqui.
+//
+// Isso evita que o comando seja
+// executado sem autorização caso
+// o carregador seja alterado.
+
+function verificarPermissao(
+    interaction
+) {
+    if (
+        !interaction.guild ||
+        !interaction.inGuild()
+    ) {
+        throw new ErroVenda(
+            'O comando /venda só pode ' +
+            'ser usado em servidores.'
+        );
+    }
+
+    if (
+        !interaction.memberPermissions?.has(
+            PermissionFlagsBits.Administrator
+        )
+    ) {
+        throw new ErroVenda(
+            'Apenas administradores podem ' +
+            'registrar vendas manualmente.'
+        );
+    }
+}
+
+// ==========================================
+// VALIDAR VALOR DA COMPRA
+// ==========================================
+
+function validarValorCompra(
+    valor
+) {
+    const numero =
+        Number(valor);
+
+    if (
+        !Number.isFinite(numero) ||
+        numero <= 0 ||
+        numero > VALOR_MAXIMO
+    ) {
+        throw new ErroVenda(
+            'Informe um valor válido e ' +
+            'maior que zero.'
+        );
+    }
+
+    // O histórico monetário aceita
+    // no máximo duas casas decimais.
+    //
+    // Usamos tolerância mínima para
+    // evitar problemas de representação
+    // de números decimais em JavaScript.
+
+    const centavos =
+        Math.round(
+            numero * 100
+        );
+
+    if (
+        !Number.isSafeInteger(centavos) ||
+        Math.abs(
+            numero * 100 - centavos
+        ) > 0.00001
+    ) {
+        throw new ErroVenda(
+            'O valor deve ter no máximo ' +
+            'duas casas decimais.'
+        );
+    }
+
+    return centavos / 100;
+}
+
+// ==========================================
+// VALIDAR QUANTIDADE DE ROBUX
+// ==========================================
+
+function validarQuantidadeRobux(
+    quantia
+) {
+    const numero =
+        Number(quantia);
+
+    if (
+        !Number.isSafeInteger(numero) ||
+        numero < 1 ||
+        numero > ROBUX_MAXIMO
+    ) {
+        throw new ErroVenda(
+            'A quantidade de Robux deve ' +
+            'ser um número inteiro entre ' +
+            '1 e 50.000.000.'
+        );
+    }
+
+    return numero;
+}
+
+// ==========================================
+// VALIDAR CLIENTE
+// ==========================================
+
+function validarCliente(
+    interaction,
+    usuario
+) {
+    if (!usuario?.id) {
+        throw new ErroVenda(
+            'Selecione um cliente válido.'
+        );
+    }
+
+    if (usuario.bot) {
+        throw new ErroVenda(
+            'Não é permitido registrar ' +
+            'vendas para bots.'
+        );
+    }
+
+    if (
+        usuario.id ===
+        interaction.client.user?.id
+    ) {
+        throw new ErroVenda(
+            'O bot não pode ser o cliente ' +
+            'de uma venda.'
+        );
+    }
+
+    return usuario;
+}
+
+// ==========================================
+// CRIAR CHAVE ÚNICA DA VENDA
+// ==========================================
+
+// O ID de cada interação do Discord
+// é único.
+//
+// Se a mesma interação for processada
+// novamente, a chave será igual.
+//
+// O vendaService.js reconhecerá
+// que a compra já foi registrada.
+//
+// Uma NOVA execução do /venda terá
+// outro ID e representará uma nova
+// operação administrativa.
+//
+// Isso impede duplicidade da mesma
+// interação, mas não duas vendas
+// distintas criadas por engano.
+
+function criarChaveVenda(
+    interaction
+) {
+    return (
+        'venda_manual_' +
+        interaction.id
     );
 }
 
 // ==========================================
-// NOMES DAS MODALIDADES
+// CRIAR EMBED DE CONFIRMAÇÃO
 // ==========================================
 
-const NOMES_MODALIDADES = {
-    viaPlus: 'Via Plus',
-    semTaxa: 'Robux Sem Taxa',
-    taxado: 'Robux Taxado',
-    viaGrupo: 'Robux Via Grupo',
-    outro: 'Outra modalidade'
-};
+function criarEmbedConfirmacao({
+    clienteId,
+    moderadorId,
+    valor,
+    robux,
+    dadosCliente,
+    publicacaoUrl,
+    jaRegistrada
+}) {
+    const embed =
+        new EmbedBuilder()
+            .setColor(COR)
+            .setTitle(
+                '💎 INOVARESALE | VENDA REGISTRADA'
+            )
+            .setDescription(
+                jaRegistrada
+                    ? 'ℹ️ **Essa operação já estava registrada.**'
+                    : '✅ **Venda registrada com sucesso!**'
+            )
+            .addFields(
+                {
+                    name: '👤 Cliente',
+                    value:
+                        `<@${clienteId}>`,
+                    inline: true
+                },
 
-const NOMES_PAGAMENTOS = {
-    pix: 'PIX',
-    mm: 'Intermediário (MM)',
-    outro: 'Outro'
-};
+                {
+                    name: '🛡️ Administrador',
+                    value:
+                        `<@${moderadorId}>`,
+                    inline: true
+                },
+
+                {
+                    name: '💰 Valor pago',
+                    value:
+                        formatarDinheiro(
+                            valor
+                        ),
+                    inline: true
+                },
+
+                {
+                    name: '💎 Robux comprados',
+                    value:
+                        formatarRobux(
+                            robux
+                        ),
+                    inline: true
+                },
+
+                {
+                    name: '🛒 Total de compras',
+                    value:
+                        formatarRobux(
+                            dadosCliente.quantidadeCompras
+                        ),
+                    inline: true
+                },
+
+                {
+                    name: '💵 Total gasto pelo cliente',
+                    value:
+                        formatarDinheiro(
+                            dadosCliente.totalGasto
+                        ),
+                    inline: true
+                },
+
+                {
+                    name: '📊 Total de Robux adquiridos',
+                    value:
+                        formatarRobux(
+                            dadosCliente.totalRobux
+                        ),
+                    inline: false
+                }
+            )
+            .setFooter({
+                text:
+                    'InovareSale Bot 3.0 • Histórico SQLite'
+            })
+            .setTimestamp();
+
+    if (publicacaoUrl) {
+        embed.addFields({
+            name: '📢 Anúncio da compra',
+            value:
+                `[Ver publicação](${publicacaoUrl})`,
+            inline: false
+        });
+    }
+
+    return embed;
+}
+
+// ==========================================
+// IDENTIFICAR AVISOS NÃO CRÍTICOS
+// ==========================================
+
+// Uma venda já registrada no SQLite
+// nunca é desfeita porque faltou
+// publicar um anúncio ou atualizar
+// o cargo do cliente.
+//
+// Esses problemas são mostrados
+// separadamente ao administrador.
+
+function criarAvisos(
+    resultado
+) {
+    const avisos = [];
+
+    if (resultado.erroCargo) {
+        avisos.push(
+            '⚠️ A compra foi salva, mas ' +
+            'o cargo de fidelidade não pôde ' +
+            'ser atualizado.'
+        );
+    }
+
+    if (resultado.erroPublicacao) {
+        avisos.push(
+            '⚠️ A compra foi salva, mas ' +
+            'a publicação no canal de ' +
+            'vendas precisa de verificação.'
+        );
+    }
+
+    if (
+        resultado.erroLog ||
+        resultado.log?.publicado === false
+    ) {
+        avisos.push(
+            'ℹ️ O registro de logs está ' +
+            'pendente ou precisa de revisão.'
+        );
+    }
+
+    return avisos.join('\n');
+}
+
+// ==========================================
+// TRATAR ERROS
+// ==========================================
+
+function mensagemErro(
+    erro
+) {
+    if (
+        erro instanceof ErroVenda
+    ) {
+        return (
+            '❌ ' +
+            erro.message
+        );
+    }
+
+    return (
+        '❌ Não foi possível confirmar ' +
+        'o registro da venda. Verifique ' +
+        'o histórico do cliente antes ' +
+        'de tentar novamente, para evitar ' +
+        'uma compra duplicada.'
+    );
+}
 
 // ==========================================
 // COMANDO /VENDA
 // ==========================================
 
 module.exports = {
+    data:
+        new SlashCommandBuilder()
+            .setName('venda')
+            .setDescription(
+                'Registra uma venda manual de Robux.'
+            )
 
-    data: new SlashCommandBuilder()
+            // ==================================
+            // APENAS ADMINISTRADORES
+            // ==================================
 
-        .setName('venda')
+            .setDefaultMemberPermissions(
+                PermissionFlagsBits.Administrator
+            )
 
-        .setDescription(
-            'Registra uma venda manual da InovareSale.'
-        )
+            .setDMPermission(false)
 
-        .setDefaultMemberPermissions(
-            PermissionFlagsBits.Administrator
-        )
+            // ==================================
+            // CLIENTE
+            // ==================================
 
-        // ==================================
-        // CLIENTE
-        // ==================================
+            .addUserOption(opcao =>
+                opcao
+                    .setName('usuario')
+                    .setDescription(
+                        'Cliente que realizou a compra'
+                    )
+                    .setRequired(true)
+            )
 
-        .addUserOption(option =>
-            option
-                .setName('cliente')
-                .setDescription(
-                    'Cliente que realizou a compra'
-                )
-                .setRequired(true)
-        )
+            // ==================================
+            // VALOR PAGO
+            // ==================================
 
-        // ==================================
-        // VALOR EM REAIS
-        // ==================================
+            .addNumberOption(opcao =>
+                opcao
+                    .setName('valor')
+                    .setDescription(
+                        'Valor pago em reais. Exemplo: 150'
+                    )
+                    .setRequired(true)
+                    .setMinValue(0.01)
+                    .setMaxValue(
+                        VALOR_MAXIMO
+                    )
+            )
 
-        .addNumberOption(option =>
-            option
-                .setName('valor')
-                .setDescription(
-                    'Valor efetivamente pago em reais'
-                )
-                .setMinValue(0.01)
-                .setRequired(true)
-        )
+            // ==================================
+            // QUANTIDADE DE ROBUX
+            // ==================================
 
-        // ==================================
-        // QUANTIDADE DE ROBUX
-        // ==================================
-
-        .addIntegerOption(option =>
-            option
-                .setName('robux')
-                .setDescription(
-                    'Quantidade de Robux comprados'
-                )
-                .setMinValue(1)
-                .setRequired(true)
-        )
-
-        // ==================================
-        // MODALIDADE
-        // ==================================
-
-        .addStringOption(option =>
-            option
-                .setName('modalidade')
-                .setDescription(
-                    'Modalidade utilizada na venda'
-                )
-                .setRequired(false)
-                .addChoices(
-                    {
-                        name: 'Via Plus',
-                        value: 'viaPlus'
-                    },
-                    {
-                        name: 'Robux Sem Taxa',
-                        value: 'semTaxa'
-                    },
-                    {
-                        name: 'Robux Taxado',
-                        value: 'taxado'
-                    },
-                    {
-                        name: 'Robux Via Grupo',
-                        value: 'viaGrupo'
-                    },
-                    {
-                        name: 'Outra modalidade',
-                        value: 'outro'
-                    }
-                )
-        )
-
-        // ==================================
-        // USUÁRIO DO ROBLOX
-        // ==================================
-
-        .addStringOption(option =>
-            option
-                .setName('roblox')
-                .setDescription(
-                    'Username do cliente no Roblox'
-                )
-                .setMaxLength(50)
-                .setRequired(false)
-        )
-
-        // ==================================
-        // MÉTODO DE PAGAMENTO
-        // ==================================
-
-        .addStringOption(option =>
-            option
-                .setName('pagamento')
-                .setDescription(
-                    'Método de pagamento utilizado'
-                )
-                .setRequired(false)
-                .addChoices(
-                    {
-                        name: 'PIX',
-                        value: 'pix'
-                    },
-                    {
-                        name: 'Solicitar MM',
-                        value: 'mm'
-                    },
-                    {
-                        name: 'Outro',
-                        value: 'outro'
-                    }
-                )
-        ),
+            .addIntegerOption(opcao =>
+                opcao
+                    .setName('quantia')
+                    .setDescription(
+                        'Quantidade de Robux comprados'
+                    )
+                    .setRequired(true)
+                    .setMinValue(1)
+                    .setMaxValue(
+                        ROBUX_MAXIMO
+                    )
+            ),
 
     // ======================================
     // EXECUTAR COMANDO
     // ======================================
 
     async execute(interaction) {
-
-        // Apenas administradores
-        if (
-            !interaction.memberPermissions?.has(
-                PermissionFlagsBits.Administrator
-            )
-        ) {
-            return interaction.reply({
-                content:
-                    '❌ Apenas administradores podem registrar vendas manualmente.',
-                flags: MessageFlags.Ephemeral
-            });
-        }
-
-        if (!interaction.guild) {
-            return interaction.reply({
-                content:
-                    '❌ Este comando só funciona dentro do servidor.',
-                flags: MessageFlags.Ephemeral
-            });
-        }
-
-        await interaction.deferReply({
-            flags: MessageFlags.Ephemeral
-        });
-
         try {
+            // ==================================
+            // VERIFICAR PERMISSÃO
+            // ==================================
+
+            verificarPermissao(
+                interaction
+            );
 
             // ==================================
-            // OBTER DADOS DA VENDA
+            // OBTER CLIENTE
             // ==================================
 
-            const cliente =
-                interaction.options.getUser(
-                    'cliente',
-                    true
+            const usuario =
+                validarCliente(
+                    interaction,
+
+                    interaction.options.getUser(
+                        'usuario',
+                        true
+                    )
                 );
+
+            // ==================================
+            // OBTER VALOR
+            // ==================================
 
             const valor =
-                interaction.options.getNumber(
-                    'valor',
-                    true
+                validarValorCompra(
+                    interaction.options.getNumber(
+                        'valor',
+                        true
+                    )
                 );
+
+            // ==================================
+            // OBTER ROBUX
+            // ==================================
 
             const robux =
-                interaction.options.getInteger(
-                    'robux',
-                    true
+                validarQuantidadeRobux(
+                    interaction.options.getInteger(
+                        'quantia',
+                        true
+                    )
                 );
 
-            const modalidade =
-                interaction.options.getString(
-                    'modalidade'
-                ) || 'outro';
-
-            const usuarioRoblox =
-                interaction.options.getString(
-                    'roblox'
-                )?.trim() || null;
-
-            const pagamento =
-                interaction.options.getString(
-                    'pagamento'
-                ) || 'outro';
-
             // ==================================
-            // VALIDAR CLIENTE
+            // ADIAR RESPOSTA PRIVADA
             // ==================================
 
-            if (cliente.bot) {
-                return interaction.editReply({
-                    content:
-                        '❌ Você não pode registrar uma venda para um bot.'
+            await interaction.deferReply({
+                flags:
+                    MessageFlags.Ephemeral
+            });
+
+            // ==================================
+            // GERAR CHAVE DA VENDA
+            // ==================================
+
+            const chaveEvento =
+                criarChaveVenda(
+                    interaction
+                );
+
+            // ==================================
+            // REGISTRAR VENDA NO SERVIÇO
+            // ==================================
+
+            // O serviço realiza:
+            //
+            // - Transação SQLite
+            // - Atualização dos totais
+            // - Histórico do cliente
+            // - Atualização dos cargos
+            // - Publicação da compra
+            // - Registro nos logs
+            //
+            // A mesma chaveEvento
+            // protege contra repetição
+            // dessa interação.
+
+            const resultado =
+                await registrarVenda({
+                    guild:
+                        interaction.guild,
+
+                    clienteId:
+                        usuario.id,
+
+                    valor,
+
+                    robux,
+
+                    registradoPorId:
+                        interaction.user.id,
+
+                    modalidade:
+                        'outro',
+
+                    usuarioRoblox:
+                        '',
+
+                    pagamento:
+                        'outro',
+
+                    origem:
+                        'manual',
+
+                    ticketId:
+                        null,
+
+                    chaveEvento
                 });
-            }
 
             // ==================================
-            // VALIDAR VALORES
+            // CONFIRMAR DADOS
             // ==================================
 
             if (
-                !Number.isFinite(valor) ||
-                valor <= 0 ||
-                !Number.isSafeInteger(robux) ||
-                robux <= 0
+                !resultado?.dadosCliente
             ) {
-                return interaction.editReply({
-                    content:
-                        '❌ Valor ou quantidade de Robux inválidos.'
+                throw new ErroVenda(
+                    'O serviço não confirmou ' +
+                    'os dados da venda.'
+                );
+            }
+
+            // ==================================
+            // CRIAR EMBED
+            // ==================================
+
+            const embed =
+                criarEmbedConfirmacao({
+                    clienteId:
+                        usuario.id,
+
+                    moderadorId:
+                        interaction.user.id,
+
+                    valor,
+
+                    robux,
+
+                    dadosCliente:
+                        resultado.dadosCliente,
+
+                    publicacaoUrl:
+                        resultado.publicacaoUrl,
+
+                    jaRegistrada:
+                        Boolean(
+                            resultado.jaRegistrada
+                        )
                 });
-            }
 
             // ==================================
-            // VERIFICAR SE CLIENTE ESTÁ
-            // NO SERVIDOR
+            // CRIAR AVISOS
             // ==================================
 
-            let membro;
+            const aviso =
+                criarAvisos(
+                    resultado
+                );
 
-            try {
-                membro =
-                    await interaction.guild.members.fetch(
-                        cliente.id
-                    );
-            } catch {
-                return interaction.editReply({
+            // ==================================
+            // RESPONDER AO ADMINISTRADOR
+            // ==================================
+
+            await responderPrivado(
+                interaction,
+                {
                     content:
-                        '❌ Não encontrei esse cliente no servidor.'
-                });
-            }
+                        aviso || null,
 
-            if (!membro) {
-                return interaction.editReply({
-                    content:
-                        '❌ Cliente não encontrado.'
-                });
-            }
-
-            // ==================================
-            // REGISTRAR VENDA
-            //
-            // A MESMA FUNÇÃO SERÁ UTILIZADA
-            // PELOS TICKETS AUTOMÁTICOS
-            // ==================================
-
-            const resultado = await registrarVenda({
-
-                guild: interaction.guild,
-
-                clienteId: cliente.id,
-
-                valor: valor,
-
-                robux: robux,
-
-                registradoPorId:
-                    interaction.user.id,
-
-                modalidade: modalidade,
-
-                usuarioRoblox: usuarioRoblox,
-
-                pagamento: pagamento,
-
-                origem: 'manual'
-
-            });
-
-            // ==================================
-            // CONFIRMAR REGISTRO
-            // ==================================
-
-            const dadosCliente =
-                resultado.dadosCliente;
-
-            let resposta =
-                '✅ **VENDA REGISTRADA COM SUCESSO!**\n\n' +
-
-                `👤 **Cliente:** <@${cliente.id}>\n` +
-
-                `💎 **Robux:** ${formatarRobux(robux)}\n` +
-
-                `💰 **Valor:** ${formatarDinheiro(valor)}\n` +
-
-                `🛒 **Modalidade:** ${NOMES_MODALIDADES[modalidade]}\n` +
-
-                `💳 **Pagamento:** ${NOMES_PAGAMENTOS[pagamento]}\n`;
-
-            if (usuarioRoblox) {
-                resposta +=
-                    `🎮 **Roblox:** ${usuarioRoblox}\n`;
-            }
-
-            resposta +=
-                '\n━━━━━━━━━━━━━━━━━━\n\n' +
-
-                `📦 **Compras realizadas:** ${dadosCliente.quantidadeCompras}\n` +
-
-                `💵 **Total gasto:** ${formatarDinheiro(dadosCliente.totalGasto)}\n` +
-
-                `💎 **Total de Robux:** ${formatarRobux(dadosCliente.totalRobux)}\n`;
-
-            // ==================================
-            // CARGO ATUALIZADO
-            // ==================================
-
-            if (resultado.cargoId) {
-                resposta +=
-                    `\n🏆 **Cargo:** <@&${resultado.cargoId}>\n`;
-            }
-
-            if (resultado.erroCargo) {
-                resposta +=
-                    '\n⚠️ A venda foi registrada, ' +
-                    'mas não consegui atualizar o cargo do cliente.\n';
-            }
-
-            // ==================================
-            // LINK DA PUBLICAÇÃO
-            // ==================================
-
-            if (resultado.publicacaoUrl) {
-                resposta +=
-                    '\n📢 **Publicação da venda:**\n' +
-                    resultado.publicacaoUrl;
-            } else {
-                resposta +=
-                    '\n⚠️ Verifique o canal de vendas: ' +
-                    'a publicação não foi confirmada.';
-            }
-
-            await interaction.editReply({
-                content: resposta,
-                allowedMentions: {
-                    parse: []
+                    embeds: [embed]
                 }
-            });
+            );
+
+            // ==================================
+            // REGISTRAR NO CONSOLE
+            // ==================================
+
+            if (
+                resultado.jaRegistrada
+            ) {
+                console.log(
+                    '[InovareSale | Venda] ' +
+                    'Operação repetida detectada: ' +
+                    chaveEvento
+                );
+
+            } else {
+                console.log(
+                    '[InovareSale | Venda] ' +
+                    `Venda manual registrada | ` +
+                    `Cliente: ${usuario.id} | ` +
+                    `Robux: ${robux} | ` +
+                    `Valor: ${valor} | ` +
+                    `Administrador: ${
+                        interaction.user.id
+                    }`
+                );
+            }
 
         } catch (erro) {
-
             console.error(
-                '❌ Erro no comando /venda:',
+                '[InovareSale | Venda] Erro:',
                 erro
             );
 
-            await interaction.editReply({
-                content:
-                    '❌ Não consegui concluir o registro da venda.\n' +
-                    'Verifique os registros do bot antes de tentar novamente.'
-            });
+            try {
+                await responderPrivado(
+                    interaction,
+                    mensagemErro(
+                        erro
+                    )
+                );
+
+            } catch (erroResposta) {
+                console.error(
+                    '[InovareSale | Venda] ' +
+                    'Falha ao responder:',
+                    erroResposta
+                );
+            }
         }
     }
 };

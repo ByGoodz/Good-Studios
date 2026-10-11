@@ -1,26 +1,34 @@
 
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
 const {
     SlashCommandBuilder,
     EmbedBuilder,
     AttachmentBuilder
 } = require('discord.js');
 
-const fs = require('fs');
-const path = require('path');
-
 // ==========================================
-// INFORMAÇÕES DO BOT
+// INOVARESALE BOT 3.0
+// COMANDO /APRESENTAÇÃO
 // ==========================================
 
-const NOME_BOT = 'InovareSale Bot';
+const CONFIG = {
+    nome: 'InovareSale Bot',
+    versao: '3.0.0',
+    cor: 0x9951CB,
 
-// Troque pelo nome do criador quando decidir
-const CRIADOR = 'A definir';
-
-const VERSAO = '2.0.0';
+    criador: {
+        nome: 'Good',
+        usuario: 'usercriminal',
+        id: '1335053578443685918'
+    }
+};
 
 // ==========================================
-// BUSCAR IMAGENS
+// CARREGAR IMAGENS DO PROJETO
 // ==========================================
 
 function carregarImagem(nome) {
@@ -31,17 +39,115 @@ function carregarImagem(nome) {
         nome
     );
 
-    if (!fs.existsSync(caminho)) {
+    try {
+        if (!fs.existsSync(caminho)) {
+            console.warn(
+                `[Apresentação] Imagem não encontrada: ${nome}`
+            );
+            return null;
+        }
+
+        const informacoes = fs.statSync(caminho);
+
+        if (!informacoes.isFile() || informacoes.size === 0) {
+            console.warn(
+                `[Apresentação] Imagem inválida ou vazia: ${nome}`
+            );
+            return null;
+        }
+
+        return new AttachmentBuilder(caminho, {
+            name: nome
+        });
+
+    } catch (erro) {
+        console.warn(
+            `[Apresentação] Erro ao carregar ${nome}:`,
+            erro.message
+        );
+
         return null;
     }
+}
 
-    if (fs.statSync(caminho).size === 0) {
-        return null;
-    }
+// ==========================================
+// CRIAR EMBED DE APRESENTAÇÃO
+// ==========================================
 
-    return new AttachmentBuilder(caminho, {
-        name: nome
-    });
+function criarEmbedApresentacao() {
+    return new EmbedBuilder()
+        .setColor(CONFIG.cor)
+
+        .setTitle('INOVARESALE | BOT OFICIAL')
+
+        .setDescription(
+            `Olá! Eu sou o **${CONFIG.nome}**, ` +
+            'o assistente oficial da **InovareSale**.\n\n' +
+
+            'Fui desenvolvido para tornar suas compras ' +
+            'de Robux mais práticas, organizadas e seguras ' +
+            'dentro do nosso servidor.\n\n' +
+
+            '**Conheça minhas funcionalidades:**'
+        )
+
+        .addFields(
+            {
+                name: 'Central de Pedidos',
+                value:
+                    'Compre Robux e acompanhe seu atendimento.',
+                inline: true
+            },
+            {
+                name: 'Calculadora',
+                value:
+                    'Consulte os valores de cada modalidade.',
+                inline: true
+            },
+            {
+                name: 'Estoque',
+                value:
+                    'Confira a disponibilidade da loja.',
+                inline: true
+            },
+            {
+                name: 'Perfil de Cliente',
+                value:
+                    'Acompanhe compras, conquistas e emblemas.',
+                inline: true
+            },
+            {
+                name: 'Sistema de Vendas',
+                value:
+                    'Registro e confirmação de compras.',
+                inline: true
+            },
+            {
+                name: 'Administração',
+                value:
+                    'Ferramentas de gestão, equipe e moderação.',
+                inline: true
+            }
+        )
+
+        .addFields(
+            {
+                name: 'DESENVOLVIMENTO',
+                value:
+                    `**Criador:** ${CONFIG.criador.nome}\n` +
+                    `**Discord:** @${CONFIG.criador.usuario}\n` +
+                    `**Perfil:** <@${CONFIG.criador.id}>\n` +
+                    `**Versão:** ${CONFIG.versao}`,
+                inline: false
+            }
+        )
+
+        .setFooter({
+            text:
+                'InovareSale • Inovação e praticidade em cada compra'
+        })
+
+        .setTimestamp();
 }
 
 // ==========================================
@@ -57,104 +163,61 @@ module.exports = {
         ),
 
     async execute(interaction) {
+        try {
+            const embed = criarEmbedApresentacao();
+            const arquivos = [];
 
-        const embed = new EmbedBuilder()
+            // Logo no topo direito do embed.
+            const logo = carregarImagem('logo.png');
 
-            .setColor(0xC0C0C0)
+            if (logo) {
+                arquivos.push(logo);
 
-            .setTitle(
-                '💎 INOVARESALE — BOT OFICIAL'
-            )
-
-            .setDescription(
-                'Olá! 👋\n\n' +
-
-                `Eu sou o **${NOME_BOT}**, ` +
-                'o assistente oficial da **InovareSale**!\n\n' +
-
-                'Fui desenvolvido para facilitar ' +
-                'suas compras de Robux e oferecer ' +
-                'uma experiência rápida, organizada ' +
-                'e prática dentro do Discord.\n\n' +
-
-                '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-                '🧮 **CALCULADORA DE ROBUX**\n' +
-                'Calcule automaticamente os preços ' +
-                'dos Robux em diferentes modalidades.\n\n' +
-
-                '🎫 **TICKETS DE COMPRA**\n' +
-                'Abra pedidos, escolha sua modalidade ' +
-                'e acompanhe o atendimento da equipe.\n\n' +
-
-                '📦 **ESTOQUE DA LOJA**\n' +
-                'Consulte a disponibilidade de Robux ' +
-                'e o status da loja.\n\n' +
-
-                '💰 **REGISTRO DE VENDAS**\n' +
-                'Histórico organizado das compras ' +
-                'realizadas na InovareSale.\n\n' +
-
-                '🏆 **PERFIL E RECOMPENSAS**\n' +
-                'Acompanhe suas compras, seus gastos ' +
-                'e seus cargos de cliente.\n\n' +
-
-                '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-                '👑 **SOBRE MEU CRIADOR**\n' +
-                `Desenvolvido por **${CRIADOR}**.\n\n` +
-
-                '⚙️ **SOBRE MIM**\n' +
-                `Versão: **${VERSAO}**\n` +
-                'Plataforma: **Discord**\n' +
-                'Linguagem: **JavaScript / Node.js**\n' +
-                'Biblioteca: **discord.js**\n\n' +
-
-                '✨ **InovareSale — Tecnologia, ' +
-                'inovação e Robux em um só lugar!**'
-            )
-
-            .setFooter({
-                text: 'InovareSale • Sua loja de Robux'
-            })
-
-            .setTimestamp();
-
-        // ==================================
-        // LOGO E BANNER
-        // ==================================
-
-        const arquivos = [];
-
-        const logo = carregarImagem('logo.png');
-        const banner = carregarImagem('banner.png');
-
-        if (logo) {
-            arquivos.push(logo);
-
-            embed.setThumbnail(
-                'attachment://logo.png'
-            );
-        }
-
-        if (banner) {
-            arquivos.push(banner);
-
-            embed.setImage(
-                'attachment://banner.png'
-            );
-        }
-
-        // ==================================
-        // ENVIAR APRESENTAÇÃO
-        // ==================================
-
-        await interaction.reply({
-            embeds: [embed],
-            files: arquivos,
-            allowedMentions: {
-                parse: []
+                embed.setThumbnail(
+                    'attachment://logo.png'
+                );
             }
-        });
+
+            // Banner na parte inferior do embed.
+            const banner = carregarImagem('banner.png');
+
+            if (banner) {
+                arquivos.push(banner);
+
+                embed.setImage(
+                    'attachment://banner.png'
+                );
+            }
+
+            await interaction.reply({
+                embeds: [embed],
+                files: arquivos,
+
+                // Impede notificações indesejadas.
+                allowedMentions: {
+                    parse: [],
+                    users: []
+                }
+            });
+
+        } catch (erro) {
+            console.error(
+                '[InovareSale] Erro no comando /apresentação:',
+                erro
+            );
+
+            const resposta = {
+                content:
+                    'Não foi possível carregar a apresentação agora. ' +
+                    'Tente novamente em alguns instantes.',
+                ephemeral: true
+            };
+
+            if (interaction.replied || interaction.deferred) {
+                await interaction.followUp(resposta);
+            } else {
+                await interaction.reply(resposta);
+            }
+        }
     }
 };

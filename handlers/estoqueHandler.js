@@ -1,6 +1,17 @@
 
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
 const {
-    PermissionFlagsBits
+    EmbedBuilder,
+    AttachmentBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    PermissionFlagsBits,
+    ChannelType
 } = require('discord.js');
 
 const {
@@ -9,22 +20,50 @@ const {
 } = require('../utils/storage');
 
 // ==========================================
-// INOVARESALE BOT 2.0
+// INOVARESALE BOT 3.0
 // GERENCIADOR DE ESTOQUE
 // ==========================================
+
+const COR = 0x9951CB;
+const LIMITE_ROBUX = 50000000;
+
+const PASTA_ASSETS = path.join(
+    __dirname,
+    '..',
+    'assets'
+);
+
+const ASSINATURA_PNG = Buffer.from([
+    137, 80, 78, 71, 13, 10, 26, 10
+]);
 
 // ==========================================
 // FORMATAÇÕES
 // ==========================================
 
 function formatarRobux(valor) {
-    return Number(valor || 0).toLocaleString(
-        'pt-BR'
-    );
+    const numero = Number(valor || 0);
+
+    if (!Number.isFinite(numero)) {
+        return '0';
+    }
+
+    return Math.floor(
+        Math.max(0, numero)
+    ).toLocaleString('pt-BR');
 }
 
 function formatarK(valor) {
-    return `K${Number(valor).toLocaleString(
+    const numero = Number(valor ?? 39);
+
+    if (
+        !Number.isFinite(numero) ||
+        numero <= 0
+    ) {
+        return 'Não configurado';
+    }
+
+    return `K${numero.toLocaleString(
         'pt-BR',
         {
             maximumFractionDigits: 2
@@ -32,61 +71,56 @@ function formatarK(valor) {
     )}`;
 }
 
+function formatarCanal(canalId) {
+    return /^\d{17,20}$/.test(
+        String(canalId || '')
+    )
+        ? `<#${canalId}>`
+        : 'Não configurado';
+}
+
 // ==========================================
-// VALIDAR QUANTIDADE DE ROBUX
+// VALIDAR QUANTIDADE
 // ==========================================
 
 function interpretarQuantidade(texto) {
-    let valor = String(texto || '')
+    const entrada = String(texto || '')
         .trim()
         .toLowerCase()
         .replace(/\s/g, '');
 
-    if (valor.endsWith('k')) {
-        const numero = Number(
-            valor.slice(0, -1).replace(',', '.')
+    let quantidade;
+
+    if (/^\d+(?:[.,]\d+)?k$/.test(entrada)) {
+        quantidade = Number(
+            entrada
+                .slice(0, -1)
+                .replace(',', '.')
+        ) * 1000;
+
+    } else if (
+        /^\d{1,3}(?:\.\d{3})+$/.test(entrada)
+    ) {
+        quantidade = Number(
+            entrada.replace(/\./g, '')
         );
 
-        if (
-            !Number.isFinite(numero) ||
-            numero <= 0
-        ) {
-            return null;
-        }
+    } else if (/^\d+$/.test(entrada)) {
+        quantidade = Number(entrada);
 
-        const quantidade = Math.floor(
-            numero * 1000
-        );
-
-        return Number.isSafeInteger(quantidade)
-            && quantidade > 0
-            ? quantidade
-            : null;
-    }
-
-    if (!/^[\d.,]+$/.test(valor)) {
+    } else {
         return null;
     }
 
-    valor = valor
-        .replace(/\./g, '')
-        .replace(',', '.');
-
-    const numero = Number(valor);
-
     if (
-        !Number.isFinite(numero) ||
-        numero <= 0
+        !Number.isSafeInteger(quantidade) ||
+        quantidade <= 0 ||
+        quantidade > LIMITE_ROBUX
     ) {
         return null;
     }
 
-    const quantidade = Math.floor(numero);
-
-    return Number.isSafeInteger(quantidade)
-        && quantidade > 0
-        ? quantidade
-        : null;
+    return quantidade;
 }
 
 // ==========================================
@@ -95,6 +129,7 @@ function interpretarQuantidade(texto) {
 
 function usuarioPodeGerenciar(interaction) {
     return Boolean(
+        interaction.inGuild() &&
         interaction.memberPermissions?.has(
             PermissionFlagsBits.Administrator
         )
@@ -102,31 +137,33 @@ function usuarioPodeGerenciar(interaction) {
 }
 
 // ==========================================
-// VERIFICAR CONFIGURAÇÃO
+// OBTER CONFIGURAÇÃO ATUAL
 // ==========================================
 
 function obterConfiguracaoEstoque() {
     const config = getConfig();
 
-    if (!config.estoque) {
-        config.estoque = {};
-    }
+    config.estoque ??= {};
 
     return config;
 }
 
 // ==========================================
-// BUSCAR CANAL DE ESTOQUE
+// OBTER CANAL DO ESTOQUE
 // ==========================================
 
-async function obterCanalEstoque(guild, config) {
+async function obterCanalEstoque(
+    guild,
+    config
+) {
     if (!guild) {
         throw new Error(
             'Servidor não informado.'
         );
     }
 
-    const canalId = config.estoque?.canalId;
+    const canalId =
+        config.estoque?.canalId;
 
     if (!canalId) {
         throw new Error(
@@ -134,18 +171,16 @@ async function obterCanalEstoque(guild, config) {
         );
     }
 
-    const canal = await guild.channels.fetch(
-        canalId
-    );
+    const canal =
+        await guild.channels.fetch(canalId);
 
     if (
         !canal ||
-        !canal.isTextBased() ||
-        !canal.messages ||
+        canal.type !== ChannelType.GuildText ||
         typeof canal.send !== 'function'
     ) {
         throw new Error(
-            'Canal de estoque inválido ou inacessível.'
+            'O canal do estoque é inválido ou inacessível.'
         );
     }
 
@@ -153,30 +188,282 @@ async function obterCanalEstoque(guild, config) {
 }
 
 // ==========================================
-// IDENTIFICAR PUBLICAÇÕES ANTIGAS
+// CARREGAR IMAGENS
 // ==========================================
 
-function ehPublicacaoEstoque(mensagem, botId) {
-    if (!mensagem || !botId) {
-        return false;
-    }
+function carregarImagem(nome) {
+    const caminho = path.join(
+        PASTA_ASSETS,
+        nome
+    );
 
-    if (mensagem.author?.id !== botId) {
-        return false;
-    }
+    try {
+        if (!fs.existsSync(caminho)) {
+            console.warn(
+                `[Estoque] Imagem não encontrada: ${nome}`
+            );
 
-    const conteudo = mensagem.content || '';
+            return null;
+        }
+
+        const dados = fs.readFileSync(caminho);
+
+        if (
+            dados.length < 100 ||
+            dados.length > 8 * 1024 * 1024 ||
+            !dados.subarray(0, 8).equals(ASSINATURA_PNG)
+        ) {
+            console.warn(
+                `[Estoque] PNG inválido: ${nome}`
+            );
+
+            return null;
+        }
+
+        return new AttachmentBuilder(dados, {
+            name: nome
+        });
+
+    } catch (erro) {
+        console.error(
+            `[Estoque] Erro ao carregar ${nome}:`,
+            erro.message
+        );
+
+        return null;
+    }
+}
+
+// ==========================================
+// CRIAR TEXTO COMPATÍVEL
+// ==========================================
+
+// Mantemos esta função porque outros
+// arquivos podem utilizá-la.
+//
+// O anúncio principal da versão 3.0
+// será publicado por criarPublicacaoEstoque.
+
+function criarMensagemEstoque(config = {}) {
+    const estoque = config.estoque || {};
+
+    if (estoque.status !== 'ON') {
+        return (
+            '🔴 **LOJA OFF!**\n\n' +
+            'As vendas estão temporariamente pausadas.\n' +
+            'Aguarde o retorno da InovareSale.'
+        );
+    }
 
     return (
-        conteudo.includes('𝐋𝐎𝐉𝐀 𝐎𝐍') ||
-        conteudo.includes('𝐋𝐎𝐉𝐀 𝐎𝐅𝐅') ||
-        conteudo.includes('LOJA ON!') ||
-        conteudo.includes('LOJA OFF!')
+        '🟢 **LOJA ON!**\n\n' +
+        `**Estoque:** ${
+            formatarRobux(estoque.quantidade)
+        } Robux\n` +
+        `**Preço:** ${
+            formatarK(estoque.precoK)
+        }\n` +
+        `**Comprar:** ${
+            formatarCanal(estoque.canalCompraId)
+        }`
     );
 }
 
 // ==========================================
-// ENCONTRAR ÚLTIMA MENSAGEM
+// CRIAR EMBED DO ANÚNCIO 3.0
+// ==========================================
+
+function criarEmbedEstoque(config = {}) {
+    const estoque = config.estoque || {};
+
+    const lojaAtiva =
+        estoque.status === 'ON';
+
+    const quantidade = formatarRobux(
+        estoque.quantidade
+    );
+
+    const preco = formatarK(
+        estoque.precoK
+    );
+
+    const status = lojaAtiva
+        ? '🟢 Loja ON'
+        : '🔴 Loja OFF';
+
+    const embed = new EmbedBuilder()
+        .setColor(COR)
+        .setTitle(
+            'INOVARESALE | ESTOQUE DE ROBUX'
+        )
+        .setDescription(
+            lojaAtiva
+                ? (
+                    'Nossa loja está disponível para ' +
+                    'novos pedidos! Confira o estoque ' +
+                    'e inicie sua compra.'
+                )
+                : (
+                    'As vendas estão temporariamente ' +
+                    'pausadas.\n\n' +
+                    'Aguarde uma nova atualização ' +
+                    'da equipe InovareSale.'
+                )
+        )
+        .addFields(
+            {
+                name: 'Status da loja',
+                value: status,
+                inline: true
+            },
+            {
+                name: 'Robux disponíveis',
+                value: `${quantidade} Robux`,
+                inline: true
+            },
+            {
+                name: 'Preço por K',
+                value: preco,
+                inline: true
+            }
+        );
+
+    if (lojaAtiva) {
+        embed.addFields({
+            name: 'Central de Pedidos',
+            value: formatarCanal(
+                estoque.canalCompraId
+            ),
+            inline: false
+        });
+    }
+
+    embed.setFooter({
+        text:
+            'InovareSale • Sua loja de Robux'
+    });
+
+    embed.setTimestamp();
+
+    return embed;
+}
+
+// ==========================================
+// CRIAR PUBLICAÇÃO COMPLETA
+// ==========================================
+
+function criarPublicacaoEstoque(
+    config = {},
+    guildId = null
+) {
+    const embed = criarEmbedEstoque(config);
+    const arquivos = [];
+
+    const logo = carregarImagem('logo.png');
+
+    if (logo) {
+        arquivos.push(logo);
+
+        embed.setThumbnail(
+            'attachment://logo.png'
+        );
+    }
+
+    const banner = carregarImagem('banner.png');
+
+    if (banner) {
+        arquivos.push(banner);
+
+        embed.setImage(
+            'attachment://banner.png'
+        );
+    }
+
+    const componentes = [];
+
+    const canalCompraId = String(
+        config.estoque?.canalCompraId || ''
+    );
+
+    const servidorId = String(
+        guildId || ''
+    );
+
+    if (
+        config.estoque?.status === 'ON' &&
+        /^\d{17,20}$/.test(servidorId) &&
+        /^\d{17,20}$/.test(canalCompraId)
+    ) {
+        componentes.push(
+            new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setLabel('Comprar Robux')
+                        .setEmoji('🛒')
+                        .setStyle(ButtonStyle.Link)
+                        .setURL(
+                            `https://discord.com/channels/${servidorId}/${canalCompraId}`
+                        )
+                )
+        );
+    }
+
+    return {
+        embeds: [embed],
+        components: componentes,
+        files: arquivos,
+        allowedMentions: {
+            parse: []
+        }
+    };
+}
+
+// ==========================================
+// IDENTIFICAR ANÚNCIO DE ESTOQUE
+// ==========================================
+
+function ehPublicacaoEstoque(
+    mensagem,
+    botId
+) {
+    if (
+        !mensagem ||
+        mensagem.author?.id !== botId
+    ) {
+        return false;
+    }
+
+    const conteudo = String(
+        mensagem.content || ''
+    );
+
+    const textosAntigos = [
+        '𝐋𝐎𝐉𝐀 𝐎𝐍',
+        '𝐋𝐎𝐉𝐀 𝐎𝐅𝐅',
+        'LOJA ON!',
+        'LOJA OFF!'
+    ];
+
+    if (
+        textosAntigos.some(texto =>
+            conteudo.includes(texto)
+        )
+    ) {
+        return true;
+    }
+
+    // Identifica os embeds do modelo 3.0.
+    const embeds = mensagem.embeds || [];
+
+    return embeds.some(embed =>
+        String(embed.title || '').includes(
+            'INOVARESALE | ESTOQUE DE ROBUX'
+        )
+    );
+}
+
+// ==========================================
+// BUSCAR ÚLTIMO ANÚNCIO
 // ==========================================
 
 async function buscarUltimaPublicacao(
@@ -195,17 +482,21 @@ async function buscarUltimaPublicacao(
                 );
 
             if (
-                mensagem.author?.id === botId
+                ehPublicacaoEstoque(
+                    mensagem,
+                    botId
+                )
             ) {
                 return mensagem;
             }
 
         } catch {
-            // Mensagem excluída ou inacessível.
+            // Publicação antiga removida.
         }
     }
 
-    // Compatibilidade com estoques antigos.
+    // Compatibilidade com anúncios
+    // das versões anteriores.
     const mensagens =
         await canal.messages.fetch({
             limit: 100
@@ -220,59 +511,6 @@ async function buscarUltimaPublicacao(
 }
 
 // ==========================================
-// CRIAR TEXTO DO ESTOQUE
-// ==========================================
-
-function criarMensagemEstoque(config) {
-    const estoque = config.estoque || {};
-
-    if (estoque.status === 'OFF') {
-        return (
-            '🔴 **𝐋𝐎𝐉𝐀 𝐎𝐅𝐅!**\n\n' +
-
-            '📦 Nossas vendas estão ' +
-            'temporariamente pausadas.\n\n' +
-
-            '🔔 Assim que a loja estiver ' +
-            'disponível novamente, avisaremos.\n\n' +
-
-            '💎 **InovareSale • Sua loja de Robux**'
-        );
-    }
-
-    const quantidade = formatarRobux(
-        estoque.quantidade
-    );
-
-    const preco = formatarK(
-        estoque.precoK ?? 39
-    );
-
-    const canalCompra = estoque.canalCompraId
-        ? `<#${estoque.canalCompraId}>`
-        : 'Canal não configurado';
-
-    return (
-        '🟢 **𝐋𝐎𝐉𝐀 𝐎𝐍!**\n\n' +
-
-        `📦 **Estoque disponível:** ${quantidade} Robux\n\n` +
-
-        `💸 **Preço:** ${preco}\n\n` +
-
-        '🛒 **Para comprar, acesse:**\n' +
-        `${canalCompra}\n\n` +
-
-        '💬 **Dúvidas?** Nossa equipe ' +
-        'está disponível pelos tickets.\n\n' +
-
-        '⚠️ **Realize o pagamento somente ' +
-        'após autorização da equipe.**\n\n' +
-
-        '💎 **InovareSale • Sua loja de Robux**'
-    );
-}
-
-// ==========================================
 // PUBLICAR NOVO ESTOQUE
 // ==========================================
 
@@ -284,13 +522,13 @@ async function publicarEstoque({
 }) {
     if (!client?.user?.id) {
         throw new Error(
-            'Cliente do Discord indisponível.'
+            'Bot indisponível.'
         );
     }
 
     if (!['ON', 'OFF'].includes(status)) {
         throw new Error(
-            'Status de estoque inválido.'
+            'Status do estoque inválido.'
         );
     }
 
@@ -298,7 +536,8 @@ async function publicarEstoque({
         status === 'ON' &&
         (
             !Number.isSafeInteger(quantidade) ||
-            quantidade <= 0
+            quantidade <= 0 ||
+            quantidade > LIMITE_ROBUX
         )
     ) {
         throw new Error(
@@ -306,39 +545,53 @@ async function publicarEstoque({
         );
     }
 
-    const config = obterConfiguracaoEstoque();
+    const config =
+        obterConfiguracaoEstoque();
 
     const canal = await obterCanalEstoque(
         guild,
         config
     );
 
-    // Preparar novos valores.
+    // ======================================
+    // PREPARAR NOVO ESTOQUE
+    // ======================================
+
     const configAtualizada = {
         ...config,
+
         estoque: {
             ...config.estoque,
+
             status,
+
             quantidade:
-                status === 'OFF' ? 0 : quantidade
+                status === 'OFF'
+                    ? 0
+                    : quantidade
         }
     };
 
     // ======================================
-    // ENVIAR NOVA PUBLICAÇÃO
+    // PUBLICAR PRIMEIRO O ANÚNCIO NOVO
     // ======================================
 
-    const novaMensagem = await canal.send({
-        content: criarMensagemEstoque(
-            configAtualizada
-        ),
-        allowedMentions: {
-            parse: []
-        }
-    });
+    // Só atualizamos o banco depois
+    // que o Discord confirmar o envio.
+
+    const novaMensagem = await canal.send(
+        criarPublicacaoEstoque(
+            configAtualizada,
+            guild.id
+        )
+    );
 
     const mensagemAnteriorId =
         config.estoque.ultimaMensagemId;
+
+    // ======================================
+    // SALVAR NO SQLITE
+    // ======================================
 
     configAtualizada.estoque.ultimaMensagemId =
         novaMensagem.id;
@@ -346,7 +599,7 @@ async function publicarEstoque({
     saveConfig(configAtualizada);
 
     // ======================================
-    // LOCALIZAR PUBLICAÇÕES ANTIGAS
+    // IDENTIFICAR ANÚNCIOS ANTERIORES
     // ======================================
 
     const mensagensAntigas = new Map();
@@ -362,7 +615,10 @@ async function publicarEstoque({
                 );
 
             if (
-                anterior.author.id === client.user.id
+                ehPublicacaoEstoque(
+                    anterior,
+                    client.user.id
+                )
             ) {
                 mensagensAntigas.set(
                     anterior.id,
@@ -371,7 +627,7 @@ async function publicarEstoque({
             }
 
         } catch {
-            // Já pode ter sido removida.
+            // Mensagem inexistente.
         }
     }
 
@@ -397,20 +653,23 @@ async function publicarEstoque({
         }
 
     } catch (erro) {
-        console.error(
-            'Erro ao procurar estoques antigos:',
-            erro
+        console.warn(
+            '[Estoque] Não foi possível consultar os anúncios antigos:',
+            erro.message
         );
     }
 
     // ======================================
-    // APAGAR PUBLICAÇÕES ANTIGAS
+    // REMOVER SOMENTE ANÚNCIOS DE ESTOQUE
     // ======================================
 
     let apagadas = 0;
     let falhas = 0;
 
-    for (const mensagem of mensagensAntigas.values()) {
+    for (
+        const mensagem
+        of mensagensAntigas.values()
+    ) {
         try {
             await mensagem.delete();
             apagadas++;
@@ -419,9 +678,9 @@ async function publicarEstoque({
             falhas++;
 
             console.error(
-                'Não consegui apagar estoque antigo:',
+                '[Estoque] Não foi possível excluir a publicação:',
                 mensagem.id,
-                erro
+                erro.message
             );
         }
     }
@@ -429,16 +688,26 @@ async function publicarEstoque({
     return {
         mensagem: novaMensagem,
         status,
+
         quantidade:
             configAtualizada.estoque.quantidade,
+
         apagadas,
         falhas
     };
 }
 
 // ==========================================
-// EDITAR ÚLTIMA PUBLICAÇÃO
+// EDITAR ÚLTIMO ANÚNCIO
 // ==========================================
+
+// Mantém a mesma assinatura da versão 2.0.
+//
+// O texto informado será uma observação
+// personalizada acima do embed de estoque.
+//
+// Assim preservamos o banner e os campos
+// de status, Robux e preço por K.
 
 async function editarUltimoEstoque({
     guild,
@@ -447,42 +716,52 @@ async function editarUltimoEstoque({
 }) {
     if (!client?.user?.id) {
         throw new Error(
-            'Cliente do Discord indisponível.'
+            'Bot indisponível.'
         );
     }
 
-    const texto = String(novoTexto || '').trim();
+    const texto = String(
+        novoTexto || ''
+    ).trim();
 
     if (
         texto.length < 1 ||
         texto.length > 2000
     ) {
         throw new Error(
-            'A mensagem deve ter entre 1 e 2000 caracteres.'
+            'A mensagem deve ter entre ' +
+            '1 e 2.000 caracteres.'
         );
     }
 
-    const config = obterConfiguracaoEstoque();
+    const config =
+        obterConfiguracaoEstoque();
 
     const canal = await obterCanalEstoque(
         guild,
         config
     );
 
-    const mensagem = await buscarUltimaPublicacao(
-        canal,
-        config,
-        client.user.id
-    );
+    const mensagem =
+        await buscarUltimaPublicacao(
+            canal,
+            config,
+            client.user.id
+        );
 
     if (!mensagem) {
         throw new Error(
-            'Nenhuma publicação de estoque encontrada.'
+            'Nenhuma publicação de estoque foi encontrada.'
         );
     }
 
+    // Edita apenas o texto.
+    // Os embeds, botões e anexos
+    // permanecem na mensagem.
+
     await mensagem.edit({
         content: texto,
+
         allowedMentions: {
             parse: []
         }
@@ -501,25 +780,34 @@ async function editarUltimoEstoque({
 // ==========================================
 
 function consultarEstoque() {
-    const config = obterConfiguracaoEstoque();
+    const config =
+        obterConfiguracaoEstoque();
 
     return {
-        status: config.estoque.status || 'OFF',
-        quantidade:
-            Number(config.estoque.quantidade || 0),
-        precoK:
-            Number(config.estoque.precoK ?? 39),
+        status:
+            config.estoque.status || 'OFF',
+
+        quantidade: Number(
+            config.estoque.quantidade || 0
+        ),
+
+        precoK: Number(
+            config.estoque.precoK ?? 39
+        ),
+
         canalId:
             config.estoque.canalId || null,
+
         canalCompraId:
             config.estoque.canalCompraId || null,
+
         ultimaMensagemId:
             config.estoque.ultimaMensagemId || null
     };
 }
 
 // ==========================================
-// EXPORTAR FUNÇÕES
+// EXPORTAÇÕES COMPATÍVEIS
 // ==========================================
 
 module.exports = {
@@ -532,5 +820,10 @@ module.exports = {
     criarMensagemEstoque,
     publicarEstoque,
     editarUltimoEstoque,
-    consultarEstoque
+    consultarEstoque,
+
+    // Novas funções do visual 3.0.
+    criarEmbedEstoque,
+    criarPublicacaoEstoque,
+    ehPublicacaoEstoque
 };

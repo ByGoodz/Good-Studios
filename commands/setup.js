@@ -15,28 +15,81 @@ const {
 } = require('../panels/setupPanel');
 
 // ==========================================
-// INOVARESALE BOT 2.0
+// INOVARESALE BOT 3.0
 // COMANDO /SETUP
 // ==========================================
 
-// Verifica se uma mensagem é um painel
-// administrativo publicado pelo próprio bot.
+const CONFIGURACAO = {
+    nome: 'InovareSale',
+    versao: '3.0.0',
+    prefixo: '[InovareSale | Setup]'
+};
 
-function ehPainelDoSetup(mensagem, botId) {
-    if (mensagem.author?.id !== botId) {
-        return false;
-    }
+// ==========================================
+// IDENTIFICAR COMPONENTES DO SETUP
+// ==========================================
 
-    return (mensagem.components || []).some(linha =>
-        (linha.components || []).some(componente =>
-            typeof componente.customId === 'string' &&
-            componente.customId.startsWith('setup_')
-        )
+function ehComponenteSetup(componente) {
+    const id = String(
+        componente?.customId ||
+        componente?.custom_id ||
+        ''
+    );
+
+    return (
+        id.startsWith('setup_') ||
+        id.startsWith('setup:') ||
+        id.startsWith('setup3_')
     );
 }
 
 // ==========================================
-// PROCURAR PAINEL ANTIGO
+// IDENTIFICAR PAINEL ADMINISTRATIVO
+// ==========================================
+
+function ehPainelDoSetup(mensagem, botId) {
+    if (!mensagem || mensagem.author?.id !== botId) {
+        return false;
+    }
+
+    // Identifica os painéis antigos pelos botões.
+    // Identifica os novos também pelo menu de seleção.
+    const temComponentesSetup = (
+        mensagem.components || []
+    ).some(linha =>
+        (linha.components || []).some(
+            componente => ehComponenteSetup(componente)
+        )
+    );
+
+    if (temComponentesSetup) {
+        return true;
+    }
+
+    // Compatibilidade com publicações que tenham
+    // perdido os componentes após uma atualização.
+    const temEmbedAdministrativo = (
+        mensagem.embeds || []
+    ).some(embed => {
+        const titulo = String(
+            embed.title || ''
+        ).toUpperCase();
+
+        return (
+            titulo.includes('INOVARESALE') &&
+            (
+                titulo.includes('ADMINISTRATIVA') ||
+                titulo.includes('PAINEL CENTRAL') ||
+                titulo.includes('PAINEL DE CONFIGURA')
+            )
+        );
+    });
+
+    return temEmbedAdministrativo;
+}
+
+// ==========================================
+// LOCALIZAR PAINEL JÁ PUBLICADO
 // ==========================================
 
 async function localizarPainelAntigo(canal, botId) {
@@ -45,18 +98,142 @@ async function localizarPainelAntigo(canal, botId) {
             limit: 100
         });
 
-        return mensagens.find(mensagem =>
-            ehPainelDoSetup(mensagem, botId)
-        ) || null;
+        const candidatos = mensagens.filter(
+            mensagem => ehPainelDoSetup(
+                mensagem,
+                botId
+            )
+        );
+
+        return candidatos.first() || null;
 
     } catch (erro) {
         console.warn(
-            '[InovareSale] Não foi possível procurar o painel antigo:',
+            `${CONFIGURACAO.prefixo} ` +
+            'Não foi possível localizar o painel anterior:',
             erro.message
         );
 
         return null;
     }
+}
+
+// ==========================================
+// VALIDAR PUBLICAÇÃO GERADA PELO PAINEL
+// ==========================================
+
+function validarPublicacao(publicacao) {
+    if (
+        !publicacao ||
+        typeof publicacao !== 'object'
+    ) {
+        throw new Error(
+            'O setupPanel não retornou uma publicação válida.'
+        );
+    }
+
+    const temEmbeds =
+        Array.isArray(publicacao.embeds) &&
+        publicacao.embeds.length > 0;
+
+    const temConteudo =
+        typeof publicacao.content === 'string' &&
+        publicacao.content.length > 0;
+
+    if (!temEmbeds && !temConteudo) {
+        throw new Error(
+            'O painel administrativo não possui conteúdo.'
+        );
+    }
+
+    return {
+        ...publicacao,
+
+        // Não permite mencionar @everyone ou @here.
+        allowedMentions: {
+            parse: []
+        }
+    };
+}
+
+// ==========================================
+// PUBLICAR OU ATUALIZAR PAINEL
+// ==========================================
+
+async function publicarOuAtualizarPainel(
+    canal,
+    botId,
+    publicacao
+) {
+    const antigo = await localizarPainelAntigo(
+        canal,
+        botId
+    );
+
+    if (antigo) {
+        try {
+            const mensagemAtualizada = await antigo.edit(
+                publicacao
+            );
+
+            console.log(
+                `${CONFIGURACAO.prefixo} ` +
+                `Painel atualizado: ${mensagemAtualizada.id}`
+            );
+
+            return {
+                mensagem: mensagemAtualizada,
+                acao: 'atualizado'
+            };
+
+        } catch (erro) {
+            console.warn(
+                `${CONFIGURACAO.prefixo} ` +
+                'Não foi possível editar o painel anterior:',
+                erro.message
+            );
+
+            // A edição pode falhar caso a mensagem
+            // antiga não esteja mais acessível.
+            // Nesse caso, tentamos publicar outra.
+        }
+    }
+
+    const mensagemNova = await canal.send(
+        publicacao
+    );
+
+    console.log(
+        `${CONFIGURACAO.prefixo} ` +
+        `Painel publicado: ${mensagemNova.id}`
+    );
+
+    return {
+        mensagem: mensagemNova,
+        acao: 'publicado'
+    };
+}
+
+// ==========================================
+// MENSAGENS DE ERRO
+// ==========================================
+
+function criarMensagemErro(erro) {
+    console.error(
+        `${CONFIGURACAO.prefixo} Falha:`,
+        erro
+    );
+
+    return (
+        'Não foi possível publicar a Central Administrativa.\n\n' +
+        '**Verifique se o bot possui:**\n' +
+        '• Permissão para visualizar o canal.\n' +
+        '• Permissão para enviar mensagens.\n' +
+        '• Permissão para inserir links.\n' +
+        '• Permissão para anexar arquivos.\n' +
+        '• Permissão para ler o histórico de mensagens.\n\n' +
+        'Se o problema continuar, consulte o terminal do bot.'
+    );
 }
 
 // ==========================================
@@ -68,7 +245,7 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('setup')
         .setDescription(
-            'Publica ou atualiza o painel administrativo da InovareSale'
+            'Publica ou atualiza a Central Administrativa da InovareSale.'
         )
         .setDMPermission(false)
         .setDefaultMemberPermissions(
@@ -78,19 +255,20 @@ module.exports = {
     async execute(interaction) {
 
         // ==================================
-        // VERIFICAR SERVIDOR
+        // VALIDAR SERVIDOR
         // ==================================
 
         if (!interaction.inGuild()) {
             return interaction.reply({
                 content:
-                    'Este comando só funciona dentro do servidor.',
+                    'Este comando só pode ser utilizado ' +
+                    'dentro de um servidor.',
                 flags: MessageFlags.Ephemeral
             });
         }
 
         // ==================================
-        // VERIFICAR ADMINISTRADOR
+        // VALIDAR ADMINISTRADOR
         // ==================================
 
         if (
@@ -100,124 +278,88 @@ module.exports = {
         ) {
             return interaction.reply({
                 content:
-                    'Somente administradores podem usar o /setup.',
+                    'Somente administradores podem ' +
+                    'utilizar o comando `/setup`.',
                 flags: MessageFlags.Ephemeral
             });
         }
 
-        // Resposta privada enquanto o bot
-        // prepara o painel público.
+        // ==================================
+        // RESPONDER PRIVADAMENTE
+        // ==================================
 
         await interaction.deferReply({
             flags: MessageFlags.Ephemeral
         });
 
         try {
+
             // ==================================
-            // VERIFICAR CANAL
+            // VALIDAR CANAL
             // ==================================
 
             const canal = interaction.channel;
 
             if (
                 !canal ||
-                canal.type !== ChannelType.GuildText
+                canal.type !== ChannelType.GuildText ||
+                typeof canal.send !== 'function' ||
+                !canal.messages
             ) {
                 return interaction.editReply({
                     content:
-                        'Execute o /setup em um canal de texto do servidor.'
+                        'Execute o comando `/setup` ' +
+                        'em um canal de texto do servidor.'
                 });
             }
 
             // ==================================
-            // CARREGAR CONFIGURAÇÕES
+            // OBTER CONFIGURAÇÕES ATUAIS
             // ==================================
 
             const config = getConfig() || {};
 
             // ==================================
-            // CRIAR PAINEL NOVO
+            // GERAR PAINEL ADMINISTRATIVO
             // ==================================
 
-            // Usa o painel com banner.png,
-            // logo.png e os sete botões.
-
-            const painel = criarPublicacaoSetup(
-                config
+            // Este comando utiliza o setupPanel.js.
+            // Na próxima etapa, esse arquivo terá
+            // o layout 3.0, banner e menu de seleção.
+            const publicacao = validarPublicacao(
+                criarPublicacaoSetup(config)
             );
 
             // ==================================
-            // LOCALIZAR PAINEL ANTIGO
+            // PUBLICAR OU ATUALIZAR
             // ==================================
 
-            const antigo = await localizarPainelAntigo(
-                canal,
-                interaction.client.user.id
-            );
-
-            let mensagem;
-            let acao;
-
-            // ==================================
-            // ATUALIZAR PAINEL EXISTENTE
-            // ==================================
-
-            if (antigo) {
-                try {
-                    mensagem = await antigo.edit(
-                        painel
-                    );
-
-                    acao = 'atualizado';
-
-                } catch (erro) {
-                    console.warn(
-                        '[InovareSale] Erro ao atualizar painel antigo:',
-                        erro.message
-                    );
-                }
-            }
-
-            // ==================================
-            // PUBLICAR PAINEL NOVO
-            // ==================================
-
-            if (!mensagem) {
-                mensagem = await canal.send(
-                    painel
+            const resultado =
+                await publicarOuAtualizarPainel(
+                    canal,
+                    interaction.client.user.id,
+                    publicacao
                 );
 
-                acao = 'publicado';
-            }
-
             // ==================================
-            // CONFIRMAÇÃO AO ADMINISTRADOR
+            // CONFIRMAR AO ADMINISTRADOR
             // ==================================
 
-            return interaction.editReply({
+            const texto =
+                resultado.acao === 'atualizado'
+                    ? 'Central Administrativa atualizada com sucesso!'
+                    : 'Central Administrativa publicada com sucesso!';
+
+            await interaction.editReply({
                 content:
-                    `Painel administrativo ${acao} com sucesso!\n` +
-                    `[Abrir painel](${mensagem.url})`
+                    `**${texto}**\n\n` +
+                    `**Versão planejada:** ${CONFIGURACAO.versao}\n` +
+                    `[Abrir painel administrativo](${resultado.mensagem.url})`
             });
 
         } catch (erro) {
-
-            console.error(
-                '[InovareSale] Erro no /setup:',
-                erro
-            );
-
-            return interaction.editReply({
-                content:
-                    'Não foi possível publicar o painel.\n\n' +
-                    'Confira se o bot possui as permissões:\n' +
-                    '• Ver canal\n' +
-                    '• Enviar mensagens\n' +
-                    '• Inserir links\n' +
-                    '• Anexar arquivos\n\n' +
-                    `Detalhes: ${String(
-                        erro.message || erro
-                    ).slice(0, 500)}`
+            await interaction.editReply({
+                content: criarMensagemErro(erro)
             });
         }
     }

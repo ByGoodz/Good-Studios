@@ -1,6 +1,9 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 const {
     EmbedBuilder,
     ActionRowBuilder,
@@ -9,21 +12,26 @@ const {
     AttachmentBuilder
 } = require('discord.js');
 
-const fs = require('fs');
-const path = require('path');
-
 // ==========================================
-// INOVARESALE BOT 2.0
-// PAINEL PUBLICO DE PEDIDOS
+// INOVARESALE BOT 3.0
+// CENTRAL DE PEDIDOS
 // ==========================================
 
-const COR_PRINCIPAL = 0xC0C0C0;
+const COR = 0x9951CB;
 
 const PASTA_ASSETS = path.join(
     __dirname,
     '..',
     'assets'
 );
+
+const ASSINATURA_PNG = Buffer.from([
+    137, 80, 78, 71, 13, 10, 26, 10
+]);
+
+// ==========================================
+// MODALIDADES DA LOJA
+// ==========================================
 
 const MODALIDADES = [
     {
@@ -45,7 +53,7 @@ const MODALIDADES = [
 ];
 
 // ==========================================
-// CARREGAR IMAGEM PNG
+// CARREGAR IMAGENS PNG
 // ==========================================
 
 function carregarImagem(nome) {
@@ -55,63 +63,35 @@ function carregarImagem(nome) {
     );
 
     try {
-        const info = fs.statSync(caminho);
+        if (!fs.existsSync(caminho)) {
+            console.warn(
+                `[Pedidos] Imagem não encontrada: ${nome}`
+            );
+
+            return null;
+        }
+
+        const dados = fs.readFileSync(caminho);
 
         if (
-            !info.isFile() ||
-            info.size <= 0 ||
-            info.size > 8 * 1024 * 1024
+            dados.length < 100 ||
+            dados.length > 8 * 1024 * 1024 ||
+            !dados.subarray(0, 8).equals(ASSINATURA_PNG)
         ) {
             console.warn(
-                `[InovareSale] Imagem ausente ou inválida: ${nome}`
+                `[Pedidos] PNG inválido ou muito grande: ${nome}`
             );
 
             return null;
         }
 
-        // Conferir se é um PNG verdadeiro.
-        const assinatura = Buffer.alloc(8);
-
-        const arquivo = fs.openSync(
-            caminho,
-            'r'
-        );
-
-        try {
-            fs.readSync(
-                arquivo,
-                assinatura,
-                0,
-                8,
-                0
-            );
-        } finally {
-            fs.closeSync(arquivo);
-        }
-
-        const assinaturaPng = Buffer.from([
-            137, 80, 78, 71,
-            13, 10, 26, 10
-        ]);
-
-        if (!assinatura.equals(assinaturaPng)) {
-            console.warn(
-                `[InovareSale] ${nome} não é um PNG verdadeiro.`
-            );
-
-            return null;
-        }
-
-        return new AttachmentBuilder(
-            caminho,
-            {
-                name: nome
-            }
-        );
+        return new AttachmentBuilder(dados, {
+            name: nome
+        });
 
     } catch (erro) {
         console.warn(
-            `[InovareSale] Não foi possível carregar ${nome}:`,
+            `[Pedidos] Erro ao carregar ${nome}:`,
             erro.message
         );
 
@@ -120,7 +100,7 @@ function carregarImagem(nome) {
 }
 
 // ==========================================
-// VERIFICAR MODALIDADES DISPONIVEIS
+// CONSULTAR MODALIDADES DISPONÍVEIS
 // ==========================================
 
 function obterStatusModalidades(config = {}) {
@@ -130,156 +110,139 @@ function obterStatusModalidades(config = {}) {
     const calculadora =
         config.calculadora || {};
 
-    return MODALIDADES.map(metodo => {
-        const chave = metodo.chave;
+    return MODALIDADES.map(modalidade => {
+        const precoK = calculadora[modalidade.chave];
 
-        const valorK = calculadora[chave];
+        const possuiPreco =
+            precoK !== null &&
+            precoK !== undefined &&
+            Number.isFinite(Number(precoK)) &&
+            Number(precoK) > 0;
 
-        const precoValido =
-            valorK !== null &&
-            valorK !== undefined &&
-            valorK !== false &&
-            Number.isFinite(Number(valorK)) &&
-            Number(valorK) > 0;
-
-        // Via Grupo começa bloqueado.
+        // Preserva a regra anterior:
+        // Via Grupo começa indisponível até
+        // ser explicitamente liberada no setup.
         const bloqueado =
-            chave === 'viaGrupo'
+            modalidade.chave === 'viaGrupo'
                 ? bloqueados.viaGrupo !== false
-                : bloqueados[chave] === true;
+                : bloqueados[modalidade.chave] === true;
 
         return {
-            ...metodo,
-            disponivel: precoValido && !bloqueado,
-            precoK: precoValido
-                ? Number(valorK)
-                : null
+            ...modalidade,
+            disponivel: possuiPreco && !bloqueado
         };
     });
 }
 
 // ==========================================
-// CRIAR EMBED DE PEDIDOS
+// VERIFICAR SE A LOJA RECEBE PEDIDOS
+// ==========================================
+
+function temModalidadeDisponivel(config = {}) {
+    return obterStatusModalidades(config)
+        .some(modalidade => modalidade.disponivel);
+}
+
+// ==========================================
+// EMBED CENTRAL DE PEDIDOS 3.0
 // ==========================================
 
 function criarEmbedPedidos(config = {}) {
-    const modalidades =
-        obterStatusModalidades(config);
-
-    const lista = modalidades
-        .map(metodo => {
-            const status = metodo.disponivel
-                ? 'Disponível'
-                : 'Indisponível';
-
-            return (
-                `**${metodo.nome}**\n` +
-                `↳ ${status}`
-            );
-        })
-        .join('\n\n');
+    const disponivel =
+        temModalidadeDisponivel(config);
 
     const embed = new EmbedBuilder()
-        .setColor(COR_PRINCIPAL)
-
+        .setColor(COR)
         .setTitle(
-            'CENTRAL DE PEDIDOS | INOVARESALE'
+            'INOVARESALE | CENTRAL DE PEDIDOS'
         )
-
         .setDescription(
-            '**BEM-VINDO À INOVARESALE**\n\n' +
-
-            'Sua central de compras de Robux, ' +
-            'com atendimento organizado e privado.\n\n' +
-
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-            '**COMO REALIZAR SUA COMPRA**\n\n' +
-
-            'Clique no botão **Comprar quantia específica** ' +
-            'para começar seu pedido.\n\n' +
-
-            'Você poderá informar a quantidade de Robux, ' +
-            'escolher a modalidade, preencher seu usuário ' +
-            'do Roblox e selecionar o pagamento.\n\n' +
-
-            'Ao confirmar, um ticket privado será criado ' +
-            'para você conversar com nossa equipe.\n\n' +
-
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-            '**MODALIDADES DE COMPRA**\n\n' +
-
-            `${lista}\n\n` +
-
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-            '**CONSULTAR VALORES**\n\n' +
-
-            'Quer saber quanto vai pagar antes de comprar?\n' +
-            'Use o botão **Calcular valores** para acessar ' +
-            'a calculadora da loja.\n\n' +
-
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-
-            '**INFORMAÇÕES IMPORTANTES**\n\n' +
-
-            '• O valor será calculado conforme a modalidade escolhida.\n' +
-            '• O atendimento acontece em um ticket privado.\n' +
-            '• Nunca compartilhe sua senha do Roblox.\n' +
-            '• Realize o pagamento somente após orientação da equipe.'
+            'Seja bem-vindo à **InovareSale**!\n' +
+            'Adquira seus Robux com praticidade e ' +
+            'atendimento especializado.'
         )
 
-        .setFooter({
-            text: 'INOVARESALE • CENTRAL DE COMPRAS'
+        // Informações lado a lado.
+        .addFields(
+            {
+                name: 'Compra de Robux',
+                value:
+                    'Escolha a quantidade e a ' +
+                    'modalidade de entrega desejada.',
+                inline: true
+            },
+            {
+                name: 'Consulta de valores',
+                value:
+                    'Confira os preços atualizados ' +
+                    'em nossa calculadora.',
+                inline: true
+            }
+        );
+
+    if (!disponivel) {
+        embed.addFields({
+            name: 'Disponibilidade',
+            value:
+                'No momento, não há modalidades ' +
+                'liberadas para novos pedidos.',
+            inline: false
         });
+    }
+
+    embed.addFields({
+        name: 'Como continuar?',
+        value:
+            'Selecione uma das opções abaixo ' +
+            'para iniciar sua compra ou consultar os valores.',
+        inline: false
+    });
+
+    embed.setFooter({
+        text:
+            'InovareSale • Sua loja de Robux'
+    });
 
     return embed;
 }
 
 // ==========================================
-// BOTAO COMPRAR
+// BOTÃO DE COMPRA
 // ==========================================
 
-function criarBotaoComprar(config = {}) {
-    const modalidades =
-        obterStatusModalidades(config);
-
-    const algumaDisponivel =
-        modalidades.some(
-            metodo => metodo.disponivel
-        );
+function criarBotaoCompra(config = {}) {
+    const disponivel =
+        temModalidadeDisponivel(config);
 
     return new ButtonBuilder()
         .setCustomId('ticket_abrir')
-        .setLabel('Comprar quantia específica')
+        .setLabel('Comprar Robux')
+        .setEmoji('🛒')
         .setStyle(ButtonStyle.Primary)
-        .setDisabled(!algumaDisponivel);
+        .setDisabled(!disponivel);
 }
 
 // ==========================================
-// BOTAO CALCULAR VALORES
+// BOTÃO DA CALCULADORA
 // ==========================================
 
-function criarBotaoCalcular(
-    config = {},
-    guildId = null
-) {
+function criarBotaoCalculadora(config = {}, guildId) {
     const canalId =
         config.calculadora?.canalId;
 
+    const idServidor = String(guildId || '');
+    const idCanal = String(canalId || '');
+
     if (
-        guildId &&
-        /^\d{15,22}$/.test(String(guildId)) &&
-        canalId &&
-        /^\d{15,22}$/.test(String(canalId))
+        /^\d{17,20}$/.test(idServidor) &&
+        /^\d{17,20}$/.test(idCanal)
     ) {
         return new ButtonBuilder()
             .setLabel('Calcular valores')
+            .setEmoji('🧮')
             .setStyle(ButtonStyle.Link)
             .setURL(
-                `https://discord.com/channels/` +
-                `${guildId}/${canalId}`
+                `https://discord.com/channels/${idServidor}/${idCanal}`
             );
     }
 
@@ -288,12 +251,13 @@ function criarBotaoCalcular(
             'ticket_calculadora_indisponivel'
         )
         .setLabel('Calcular valores')
+        .setEmoji('🧮')
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(true);
 }
 
 // ==========================================
-// MONTAR PAINEL COMPLETO
+// GERAR PAINEL DE PEDIDOS COMPLETO
 // ==========================================
 
 function criarPainelPedidos(
@@ -304,9 +268,9 @@ function criarPainelPedidos(
 
     const arquivos = [];
 
-    // ======================================
-    // LOGO
-    // ======================================
+    // ==================================
+    // LOGO NO CANTO SUPERIOR
+    // ==================================
 
     const logo = carregarImagem('logo.png');
 
@@ -318,10 +282,12 @@ function criarPainelPedidos(
         );
     }
 
-    // ======================================
-    // BANNER PRINCIPAL
-    // ======================================
+    // ==================================
+    // BANNER DA INOVARESALE
+    // ==================================
 
+    // O Discord exibirá a imagem abaixo
+    // das informações e acima dos botões.
     const banner = carregarImagem('banner.png');
 
     if (banner) {
@@ -332,22 +298,22 @@ function criarPainelPedidos(
         );
     }
 
-    // ======================================
-    // BOTOES
-    // ======================================
+    // ==================================
+    // BOTÕES PRINCIPAIS
+    // ==================================
 
     const botoes = new ActionRowBuilder()
         .addComponents(
-            criarBotaoComprar(config),
-            criarBotaoCalcular(
+            criarBotaoCompra(config),
+            criarBotaoCalculadora(
                 config,
                 guildId
             )
         );
 
-    // ======================================
-    // RETORNO PARA O DISCORD
-    // ======================================
+    // ==================================
+    // RETORNO DO PAINEL
+    // ==================================
 
     return {
         embeds: [embed],
@@ -364,10 +330,11 @@ function criarPainelPedidos(
 // EXPORTAÇÕES
 // ==========================================
 
+// Mantemos os mesmos nomes de funções
+// utilizados pelo restante do bot.
+
 module.exports = {
     criarPainelPedidos,
     criarEmbedPedidos,
-    obterStatusModalidades,
-    criarBotaoComprar,
-    criarBotaoCalcular
+    obterStatusModalidades
 };
