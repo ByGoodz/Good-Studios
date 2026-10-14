@@ -9,7 +9,6 @@ const {
     SeparatorBuilder,
     ActionRowBuilder,
     StringSelectMenuBuilder,
-    UserSelectMenuBuilder,
     MessageFlags
 } = require('discord.js');
 
@@ -225,7 +224,9 @@ function obterEquipeEmVoz(guild, config = null) {
     let membrosSemDados = 0;
 
     for (const estado of guild.voiceStates.cache.values()) {
-        if (!estado.channelId) continue;
+        if (!estado.channelId) {
+            continue;
+        }
 
         const membro =
             estado.member ||
@@ -691,7 +692,9 @@ async function obterRankingMensal(
             cargoId
         );
 
-        if (!membro) continue;
+        if (!membro) {
+            continue;
+        }
 
         const pontos =
             item.warns * pesos.warn +
@@ -1315,6 +1318,119 @@ async function responderStatus(
     return interaction.reply(payload);
 }
 
+async function criarMenuFuncionarios(
+    guild,
+    pagina = 0
+) {
+    const cargoId = idValido(
+        getConfig().staff?.cargoId
+    );
+
+    if (!cargoId) {
+        return criarContainer(
+            '## ⚠️ Equipe não configurada',
+            'Selecione o cargo da equipe no painel administrativo.',
+            CORES.ATENCAO
+        );
+    }
+
+    if (!guild.roles.cache.has(cargoId)) {
+        return criarContainer(
+            '## ⚠️ Cargo indisponível',
+            'O cargo selecionado não foi encontrado neste servidor.',
+            CORES.ATENCAO
+        );
+    }
+
+    const membros = await guild.members.fetch();
+
+    const funcionarios = [...membros.values()]
+        .filter(membro =>
+            !membro.user.bot &&
+            membro.roles.cache.has(cargoId)
+        )
+        .sort((a, b) =>
+            a.displayName.localeCompare(
+                b.displayName,
+                'pt-BR'
+            )
+        );
+
+    if (!funcionarios.length) {
+        return criarContainer(
+            '## 👤 CONSULTAR FUNCIONÁRIO',
+            'Nenhum membro possui o cargo de equipe configurado.',
+            CORES.ATENCAO
+        );
+    }
+
+    const porPagina = 23;
+    const ultimaPagina =
+        Math.ceil(funcionarios.length / porPagina) - 1;
+
+    const paginaAtual = Math.max(
+        0,
+        Math.min(
+            Number(pagina) || 0,
+            ultimaPagina
+        )
+    );
+
+    const opcoes = funcionarios
+        .slice(
+            paginaAtual * porPagina,
+            (paginaAtual + 1) * porPagina
+        )
+        .map(membro => ({
+            label: limitarTexto(
+                membro.displayName,
+                100
+            ),
+            value: membro.id,
+            description: limitarTexto(
+                `@${membro.user.username}`,
+                100
+            )
+        }));
+
+    if (paginaAtual > 0) {
+        opcoes.push({
+            label: '◀ Página anterior',
+            value: `pagina:${paginaAtual - 1}`
+        });
+    }
+
+    if (paginaAtual < ultimaPagina) {
+        opcoes.push({
+            label: 'Próxima página ▶',
+            value: `pagina:${paginaAtual + 1}`
+        });
+    }
+
+    const menu = new StringSelectMenuBuilder()
+        .setCustomId('status_funcionario')
+        .setPlaceholder(
+            'Selecione um funcionário da equipe'
+        )
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions(opcoes);
+
+    return criarContainer(
+        '## 👤 CONSULTAR FUNCIONÁRIO',
+        [
+            `Cargo monitorado: <@&${cargoId}>`,
+            `Funcionários: **${funcionarios.length}**`,
+            `Página ${paginaAtual + 1}/${ultimaPagina + 1}`,
+            '',
+            'Escolha um funcionário abaixo.'
+        ].join('\n')
+    ).addActionRowComponents(
+        new ActionRowBuilder()
+            .addComponents(menu)
+    );
+}
+
 async function handleStatusInteraction(
     interaction
 ) {
@@ -1379,44 +1495,38 @@ async function handleStatusInteraction(
         let conteudo;
 
         if (id === 'status_funcionario') {
-            const membroId = idValido(
-                interaction.values?.[0]
-            );
+            const valor = interaction.values?.[0];
 
-            const dados =
-                await obterFuncionarioMensal(
+            if (
+                typeof valor === 'string' &&
+                /^pagina:\d+$/.test(valor)
+            ) {
+                conteudo = await criarMenuFuncionarios(
+                    interaction.guild,
+                    Number(valor.slice(7))
+                );
+            } else {
+                const membroId = idValido(valor);
+
+                const dados = await obterFuncionarioMensal(
                     interaction.guild,
                     membroId
                 );
 
-            conteudo = dados.disponivel
-                ? criarDetalhesFuncionario(dados)
-                : criarContainer(
-                    '## ⚠️ Não foi possível consultar',
-                    dados.motivo,
-                    CORES.ATENCAO
-                );
+                conteudo = dados.disponivel
+                    ? criarDetalhesFuncionario(dados)
+                    : criarContainer(
+                        '## ⚠️ Não foi possível consultar',
+                        dados.motivo,
+                        CORES.ATENCAO
+                    );
+            }
         } else {
-            const opcao =
-                interaction.values?.[0];
+            const opcao = interaction.values?.[0];
 
             if (opcao === 'individual') {
-                conteudo = criarContainer(
-                    '## 👤 CONSULTAR FUNCIONÁRIO',
-                    'Escolha abaixo o funcionário que deseja consultar.'
-                ).addActionRowComponents(
-                    new ActionRowBuilder()
-                        .addComponents(
-                            new UserSelectMenuBuilder()
-                                .setCustomId(
-                                    'status_funcionario'
-                                )
-                                .setPlaceholder(
-                                    'Selecione um funcionário'
-                                )
-                                .setMinValues(1)
-                                .setMaxValues(1)
-                        )
+                conteudo = await criarMenuFuncionarios(
+                    interaction.guild
                 );
             } else if (opcao === 'bot') {
                 conteudo = criarDetalhesBot(
@@ -1428,10 +1538,9 @@ async function handleStatusInteraction(
                 opcao === 'equipe' ||
                 opcao === 'ranking'
             ) {
-                const ranking =
-                    await obterRankingMensal(
-                        interaction.guild
-                    );
+                const ranking = await obterRankingMensal(
+                    interaction.guild
+                );
 
                 if (!ranking.disponivel) {
                     conteudo = criarContainer(
@@ -1439,21 +1548,17 @@ async function handleStatusInteraction(
                         ranking.motivo,
                         CORES.ATENCAO
                     );
-                } else if (
-                    opcao === 'ranking'
-                ) {
-                    conteudo =
-                        criarDetalhesRanking(
-                            ranking
-                        );
+                } else if (opcao === 'ranking') {
+                    conteudo = criarDetalhesRanking(
+                        ranking
+                    );
                 } else {
-                    conteudo =
-                        criarDetalhesEquipe(
-                            await obterDadosStatus(
-                                interaction.guild
-                            ),
-                            ranking
-                        );
+                    conteudo = criarDetalhesEquipe(
+                        await obterDadosStatus(
+                            interaction.guild
+                        ),
+                        ranking
+                    );
                 }
             } else {
                 conteudo = criarContainer(
@@ -1494,16 +1599,19 @@ async function obterCanalStatus(
     guild,
     config = null
 ) {
-    if (!guild?.id) return null;
+    if (!guild?.id) {
+        return null;
+    }
 
     const canalId = idValido(
         (config || getConfig()).status?.canalId
     );
 
-    if (!canalId) return null;
+    if (!canalId) {
+        return null;
+    }
 
-    let canal =
-        guild.channels.cache.get(canalId);
+    let canal = guild.channels.cache.get(canalId);
 
     if (!canal) {
         try {
@@ -1534,12 +1642,12 @@ async function buscarMensagemStatus(
 ) {
     const id = idValido(mensagemId);
 
-    if (!id) return null;
+    if (!id) {
+        return null;
+    }
 
     try {
-        return await canal.messages.fetch(
-            id
-        );
+        return await canal.messages.fetch(id);
     } catch (erro) {
         if (erro.code === 10008) {
             return null;
@@ -1577,8 +1685,7 @@ async function anunciarFuncionarioDoMes(
     guild,
     canal
 ) {
-    const periodoAtual =
-        obterPeriodoMensal();
+    const periodoAtual = obterPeriodoMensal();
 
     if (
         !periodoAtual.iniciado ||
@@ -1587,61 +1694,48 @@ async function anunciarFuncionarioDoMes(
         return false;
     }
 
-    if (
-        PREMIACOES_PROCESSANDO.has(
-            guild.id
-        )
-    ) {
+    if (PREMIACOES_PROCESSANDO.has(guild.id)) {
         return false;
     }
 
-    PREMIACOES_PROCESSANDO.add(
-        guild.id
-    );
+    PREMIACOES_PROCESSANDO.add(guild.id);
 
     try {
-        const fim =
-            periodoAtual.inicio;
+        const fim = periodoAtual.inicio;
 
         const inicioBase = new Date(
             (fim - 3600) * 1000
         );
 
-        const periodo =
-            obterPeriodoMensal(
-                inicioBase
-            );
+        const periodo = obterPeriodoMensal(
+            inicioBase
+        );
 
-        if (
-            periodo.inicio < INICIO_RANKING
-        ) {
+        if (periodo.inicio < INICIO_RANKING) {
             return false;
         }
 
-        const existente =
-            SQL_PREMIOS.obter.get(
-                guild.id,
-                periodo.inicio
-            );
+        const existente = SQL_PREMIOS.obter.get(
+            guild.id,
+            periodo.inicio
+        );
 
         if (existente?.anunciado_em) {
             return false;
         }
 
-        const resultado =
-            await obterRankingMensal(
-                guild,
-                periodo
-            );
+        const resultado = await obterRankingMensal(
+            guild,
+            periodo
+        );
 
         if (!resultado.disponivel) {
             return false;
         }
 
-        const vencedor =
-            resultado.ranking.find(
-                item => item.pontos > 0
-            ) || null;
+        const vencedor = resultado.ranking.find(
+            item => item.pontos > 0
+        ) || null;
 
         SQL_PREMIOS.inserir.run(
             guild.id,
@@ -1656,21 +1750,15 @@ async function anunciarFuncionarioDoMes(
                 '## 🏆 FUNCIONÁRIO DO MÊS',
                 `Parabéns, <@${vencedor.membroId}>!`,
                 `**Pontuação:** ${
-                    formatarNumero(
-                        vencedor.pontos
-                    )
+                    formatarNumero(vencedor.pontos)
                 } pts`,
-                `**Período:** ${
-                    periodo.rotulo
-                }`,
+                `**Período:** ${periodo.rotulo}`,
                 '',
                 '💜 Obrigado pelo seu trabalho na InovareSale!'
             ].join('\n')
             : [
                 '## 🏆 ENCERRAMENTO DO CICLO',
-                `**Período:** ${
-                    periodo.rotulo
-                }`,
+                `**Período:** ${periodo.rotulo}`,
                 'Nenhum funcionário alcançou pontuação neste ciclo.'
             ].join('\n');
 
@@ -1682,8 +1770,7 @@ async function anunciarFuncionarioDoMes(
                     0xF1C40F
                 )
             ],
-            flags:
-                MessageFlags.IsComponentsV2,
+            flags: MessageFlags.IsComponentsV2,
             allowedMentions: {
                 parse: [],
                 users: vencedor
@@ -1693,9 +1780,7 @@ async function anunciarFuncionarioDoMes(
         });
 
         SQL_PREMIOS.marcar.run(
-            Math.floor(
-                Date.now() / 1000
-            ),
+            Math.floor(Date.now() / 1000),
             guild.id,
             periodo.inicio
         );
@@ -1709,9 +1794,7 @@ async function anunciarFuncionarioDoMes(
 
         return false;
     } finally {
-        PREMIACOES_PROCESSANDO.delete(
-            guild.id
-        );
+        PREMIACOES_PROCESSANDO.delete(guild.id);
     }
 }
 
@@ -1726,11 +1809,7 @@ async function atualizarStatusServidor(
         };
     }
 
-    if (
-        SERVIDORES_ATUALIZANDO.has(
-            guild.id
-        )
-    ) {
+    if (SERVIDORES_ATUALIZANDO.has(guild.id)) {
         return {
             atualizado: false,
             ocupado: true,
@@ -1738,20 +1817,13 @@ async function atualizarStatusServidor(
         };
     }
 
-    SERVIDORES_ATUALIZANDO.add(
-        guild.id
-    );
+    SERVIDORES_ATUALIZANDO.add(guild.id);
 
     try {
         const config = getConfig();
-        const statusConfig =
-            config.status || {};
+        const statusConfig = config.status || {};
 
-        if (
-            !idValido(
-                statusConfig.canalId
-            )
-        ) {
+        if (!idValido(statusConfig.canalId)) {
             return {
                 atualizado: false,
                 configurado: false,
@@ -1759,11 +1831,10 @@ async function atualizarStatusServidor(
             };
         }
 
-        const canal =
-            await obterCanalStatus(
-                guild,
-                config
-            );
+        const canal = await obterCanalStatus(
+            guild,
+            config
+        );
 
         if (!canal) {
             return {
@@ -1773,22 +1844,18 @@ async function atualizarStatusServidor(
             };
         }
 
-        const dados =
-            await obterDadosStatus(
-                guild,
-                client
-            );
+        const dados = await obterDadosStatus(
+            guild,
+            client
+        );
 
         const payload = {
             components: [
-                criarPainelStatus(
-                    dados
-                )
+                criarPainelStatus(dados)
             ],
             content: null,
             embeds: [],
-            flags:
-                MessageFlags.IsComponentsV2,
+            flags: MessageFlags.IsComponentsV2,
             allowedMentions: {
                 parse: []
             }
@@ -1807,8 +1874,7 @@ async function atualizarStatusServidor(
             canalAnteriorId === canal.id;
 
         const mensagem =
-            mensagemId &&
-            mesmaLocalizacao
+            mensagemId && mesmaLocalizacao
                 ? await buscarMensagemStatus(
                     canal,
                     mensagemId
@@ -1828,15 +1894,9 @@ async function atualizarStatusServidor(
                 );
             }
 
-            publicada =
-                await mensagem.edit(
-                    payload
-                );
+            publicada = await mensagem.edit(payload);
         } else {
-            publicada =
-                await canal.send(
-                    payload
-                );
+            publicada = await canal.send(payload);
 
             criado = true;
 
@@ -1925,15 +1985,11 @@ async function atualizarStatusServidor(
             motivo: erro.message
         };
     } finally {
-        SERVIDORES_ATUALIZANDO.delete(
-            guild.id
-        );
+        SERVIDORES_ATUALIZANDO.delete(guild.id);
     }
 }
 
-async function atualizarTodosStatus(
-    client
-) {
+async function atualizarTodosStatus(client) {
     if (!client?.isReady?.()) {
         return {
             atualizado: false,
@@ -1941,9 +1997,7 @@ async function atualizarTodosStatus(
         };
     }
 
-    if (
-        atualizacaoGeralEmAndamento
-    ) {
+    if (atualizacaoGeralEmAndamento) {
         return {
             atualizado: false,
             ocupado: true
@@ -1962,17 +2016,13 @@ async function atualizarTodosStatus(
     };
 
     try {
-        for (
-            const guild
-            of client.guilds.cache.values()
-        ) {
+        for (const guild of client.guilds.cache.values()) {
             resumo.servidores++;
 
-            const resultado =
-                await atualizarStatusServidor(
-                    guild,
-                    client
-                );
+            const resultado = await atualizarStatusServidor(
+                guild,
+                client
+            );
 
             if (resultado.atualizado) {
                 if (resultado.criado) {
@@ -1996,16 +2046,12 @@ async function atualizarTodosStatus(
     }
 }
 
-function iniciarMonitoramentoStatus(
-    client
-) {
+function iniciarMonitoramentoStatus(client) {
     if (
         !client ||
         typeof client.isReady !== 'function'
     ) {
-        throw new Error(
-            'Cliente Discord inválido.'
-        );
+        throw new Error('Cliente Discord inválido.');
     }
 
     if (timerStatus) {
@@ -2014,9 +2060,7 @@ function iniciarMonitoramentoStatus(
 
     clienteMonitorado = client;
 
-    atualizarTodosStatus(
-        client
-    ).catch(erro => {
+    atualizarTodosStatus(client).catch(erro => {
         console.error(
             '[InovareSale | Status] Falha inicial:',
             erro
@@ -2025,9 +2069,7 @@ function iniciarMonitoramentoStatus(
 
     timerStatus = setInterval(
         () => {
-            atualizarTodosStatus(
-                client
-            ).catch(erro => {
+            atualizarTodosStatus(client).catch(erro => {
                 console.error(
                     '[InovareSale | Status] Falha periódica:',
                     erro

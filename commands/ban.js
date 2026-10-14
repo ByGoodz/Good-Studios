@@ -5,7 +5,8 @@ const {
     SlashCommandBuilder,
     PermissionFlagsBits,
     MessageFlags,
-    EmbedBuilder
+    EmbedBuilder,
+    escapeMarkdown
 } = require('discord.js');
 
 const {
@@ -13,186 +14,95 @@ const {
     registrarAcaoModeracaoComLog
 } = require('../services/moderacaoService');
 
-// ==========================================
-// INOVARESALE BOT 3.0
-// COMANDO /BAN
-// ==========================================
-
-// Funcionalidades:
-//
-// - Banir usuários do servidor
-// - Exigir permissão de banimento
-// - Verificar permissões do próprio bot
-// - Impedir autobanimento
-// - Proteger o dono do servidor
-// - Respeitar a hierarquia de cargos
-// - Salvar o banimento no SQLite
-// - Registrar a ação no canal de logs
-// - Evitar registros repetidos da interação
-//
-// IMPORTANTE:
-//
-// O banimento é realizado primeiro
-// no Discord.
-//
-// Somente depois de confirmado,
-// a ação é registrada no SQLite.
-//
-// Se o envio do log falhar,
-// o banimento não será desfeito.
-
-// ==========================================
-// CONFIGURAÇÕES
-// ==========================================
-
 const COR = 0x9951CB;
-
 const LIMITE_MOTIVO = 450;
 
-// ==========================================
-// VALIDAR MOTIVO
-// ==========================================
-
-function obterMotivo(interaction) {
-    const motivo = String(
-        interaction.options.getString(
-            'motivo'
-        ) || 'Não informado'
-    )
-        .replace(/\u0000/g, '')
-        .trim();
-
-    if (!motivo) {
-        return 'Não informado';
+class ErroModeracao extends Error {
+    constructor(mensagem) {
+        super(mensagem);
+        this.name = 'ErroModeracao';
     }
-
-    return motivo.slice(
-        0,
-        LIMITE_MOTIVO
-    );
 }
 
-// ==========================================
-// RESPONDER PRIVADAMENTE
-// ==========================================
+async function responderPrivado(interaction, dados) {
+    const conteudo = typeof dados === 'string'
+        ? { content: dados }
+        : dados;
 
-async function responderPrivado(
-    interaction,
-    dados
-) {
-    const payload =
-        typeof dados === 'string'
-            ? { content: dados }
-            : dados;
-
-    const resposta = {
-        ...payload,
-
+    const payload = {
+        ...conteudo,
         allowedMentions: {
             parse: []
         }
     };
 
     if (interaction.deferred) {
-        return interaction.editReply(
-            resposta
-        );
+        return interaction.editReply(payload);
     }
 
     if (interaction.replied) {
         return interaction.followUp({
-            ...resposta,
+            ...payload,
             flags: MessageFlags.Ephemeral
         });
     }
 
     return interaction.reply({
-        ...resposta,
+        ...payload,
         flags: MessageFlags.Ephemeral
     });
 }
 
-// ==========================================
-// VERIFICAR PERMISSÕES
-// ==========================================
+function obterMotivo(interaction) {
+    const motivo = String(
+        interaction.options.getString('motivo') ||
+        'Não informado'
+    )
+        .replace(/\u0000/g, '')
+        .trim();
 
-async function verificarPermissoes(
-    interaction,
-    usuario
-) {
-    const guild =
-        interaction.guild;
+    return motivo
+        ? motivo.slice(0, LIMITE_MOTIVO)
+        : 'Não informado';
+}
 
-    const moderador =
-        interaction.user;
+async function verificarPermissoes(interaction, usuario) {
+    const guild = interaction.guild;
+    const moderador = interaction.user;
 
-    // ======================================
-    // SERVIDOR OBRIGATÓRIO
-    // ======================================
-
-    if (!guild) {
-        throw new Error(
-            'O comando /ban só pode ser ' +
-            'utilizado dentro de um servidor.'
+    if (!guild || !interaction.inGuild()) {
+        throw new ErroModeracao(
+            'O comando /ban só pode ser utilizado em servidores.'
         );
     }
-
-    // ======================================
-    // PERMISSÃO DO MODERADOR
-    // ======================================
 
     if (
         !interaction.memberPermissions?.has(
             PermissionFlagsBits.BanMembers
         )
     ) {
-        throw new Error(
-            'Você não possui permissão ' +
-            'para banir usuários.'
+        throw new ErroModeracao(
+            'Você não possui permissão para banir usuários.'
         );
     }
 
-    // ======================================
-    // IMPEDIR AUTOBANIMENTO
-    // ======================================
-
-    if (
-        usuario.id === moderador.id
-    ) {
-        throw new Error(
+    if (usuario.id === moderador.id) {
+        throw new ErroModeracao(
             'Você não pode banir a si mesmo.'
         );
     }
 
-    // ======================================
-    // PROTEGER O BOT
-    // ======================================
-
-    if (
-        usuario.id ===
-        interaction.client.user.id
-    ) {
-        throw new Error(
+    if (usuario.id === interaction.client.user.id) {
+        throw new ErroModeracao(
             'Não é possível banir o próprio bot.'
         );
     }
 
-    // ======================================
-    // PROTEGER O DONO DO SERVIDOR
-    // ======================================
-
-    if (
-        usuario.id ===
-        guild.ownerId
-    ) {
-        throw new Error(
+    if (usuario.id === guild.ownerId) {
+        throw new ErroModeracao(
             'Não é possível banir o dono do servidor.'
         );
     }
-
-    // ======================================
-    // PERMISSÃO DO BOT
-    // ======================================
 
     const botMembro =
         guild.members.me ||
@@ -203,76 +113,42 @@ async function verificarPermissoes(
             PermissionFlagsBits.BanMembers
         )
     ) {
-        throw new Error(
-            'O bot não possui a permissão ' +
-            '"Banir membros" neste servidor.'
+        throw new ErroModeracao(
+            'O bot não possui a permissão "Banir membros".'
         );
     }
 
-    // ======================================
-    // BUSCAR MEMBRO ALVO
-    // ======================================
+    let membroAlvo;
 
-    // O Discord permite banir usuários
-    // que já saíram do servidor.
-    //
-    // Nesse caso, não existe cargo
-    // dentro do servidor para comparar.
-
-    const membroAlvo =
-        await guild.members.fetch(
-            usuario.id
-        ).catch(erro => {
-            // Discord: membro desconhecido.
-            //
-            // Outros erros não devem
-            // ser interpretados como
-            // ausência do usuário.
-
-            if (
-                erro.code === 10007
-            ) {
-                return null;
-            }
-
-            throw erro;
+    try {
+        membroAlvo = await guild.members.fetch({
+            user: usuario.id,
+            force: true
         });
+    } catch (erro) {
+        if (erro.code !== 10007) {
+            throw erro;
+        }
+
+        membroAlvo = null;
+    }
 
     if (!membroAlvo) {
         return;
     }
 
-    // ======================================
-    // HIERARQUIA DO BOT
-    // ======================================
-
-    if (
-        !membroAlvo.bannable
-    ) {
-        throw new Error(
-            'Não consigo banir esse usuário. ' +
-            'Verifique a hierarquia dos cargos do bot.'
+    if (!membroAlvo.bannable) {
+        throw new ErroModeracao(
+            'Não consigo banir esse usuário. Verifique a hierarquia dos cargos do bot.'
         );
     }
 
-    // ======================================
-    // HIERARQUIA DO MODERADOR
-    // ======================================
-
-    // O dono do servidor não está
-    // limitado pela hierarquia de cargos.
-    //
-    // Outros moderadores só podem banir
-    // pessoas abaixo do cargo mais alto.
-
-    if (
-        moderador.id !==
-        guild.ownerId
-    ) {
+    if (moderador.id !== guild.ownerId) {
         const membroModerador =
-            await guild.members.fetch(
-                moderador.id
-            );
+            await guild.members.fetch({
+                user: moderador.id,
+                force: true
+            });
 
         const comparacao =
             membroModerador.roles.highest
@@ -281,17 +157,28 @@ async function verificarPermissoes(
                 );
 
         if (comparacao <= 0) {
-            throw new Error(
-                'Você não pode banir um usuário ' +
-                'com cargo igual ou superior ao seu.'
+            throw new ErroModeracao(
+                'Você não pode banir um usuário com cargo igual ou superior ao seu.'
             );
         }
     }
 }
 
-// ==========================================
-// MONTAR EMBED DE CONFIRMAÇÃO
-// ==========================================
+async function verificarBanimentoExistente(guild, usuarioId) {
+    try {
+        const banimento = await guild.bans.fetch(
+            usuarioId
+        );
+
+        return Boolean(banimento);
+    } catch (erro) {
+        if (erro.code === 10026) {
+            return false;
+        }
+
+        throw erro;
+    }
+}
 
 function criarEmbedBan({
     usuario,
@@ -300,64 +187,51 @@ function criarEmbedBan({
     casoId,
     logPublicado
 }) {
-    const embed =
-        new EmbedBuilder()
-            .setColor(COR)
-            .setTitle(
-                'INOVARESALE | BANIMENTO'
-            )
-            .setDescription(
-                '🔨 **Usuário banido com sucesso!**'
-            )
-            .addFields(
-                {
-                    name: 'Usuário',
-                    value:
-                        `<@${usuario.id}>`,
-                    inline: true
-                },
-
-                {
-                    name: 'Moderador',
-                    value:
-                        `<@${moderador.id}>`,
-                    inline: true
-                },
-
-                {
-                    name: 'ID do usuário',
-                    value:
-                        `\`${usuario.id}\``,
-                    inline: false
-                },
-
-                {
-                    name: 'Motivo',
-                    value:
-                        motivo,
-                    inline: false
-                }
-            )
-            .setFooter({
-                text:
-                    'InovareSale • Moderação 3.0'
-            })
-            .setTimestamp();
+    const embed = new EmbedBuilder()
+        .setColor(COR)
+        .setTitle('INOVARESALE | BANIMENTO')
+        .setDescription(
+            '🔨 **Usuário banido com sucesso!**'
+        )
+        .addFields(
+            {
+                name: 'Usuário',
+                value: `<@${usuario.id}>`,
+                inline: true
+            },
+            {
+                name: 'Moderador',
+                value: `<@${moderador.id}>`,
+                inline: true
+            },
+            {
+                name: 'ID do usuário',
+                value: `\`${usuario.id}\``,
+                inline: false
+            },
+            {
+                name: 'Motivo',
+                value: escapeMarkdown(motivo),
+                inline: false
+            }
+        )
+        .setFooter({
+            text: 'InovareSale • Moderação 3.1'
+        })
+        .setTimestamp();
 
     if (casoId) {
         embed.addFields({
             name: 'Caso registrado',
-            value:
-                `#${casoId}`,
+            value: `#${casoId}`,
             inline: true
         });
     }
 
-    if (logPublicado === true) {
+    if (logPublicado) {
         embed.addFields({
             name: 'Log',
-            value:
-                'Registro processado',
+            value: '✅ Registro processado',
             inline: true
         });
     }
@@ -365,300 +239,208 @@ function criarEmbedBan({
     return embed;
 }
 
-// ==========================================
-// REGISTRAR BANIMENTO
-// ==========================================
-
 async function registrarBanimento(
     interaction,
     usuario,
     motivo
 ) {
     return registrarAcaoModeracaoComLog({
-        guild:
-            interaction.guild,
-
-        tipo:
-            TIPOS.BAN,
-
-        moderadorId:
-            interaction.user.id,
-
-        usuarioId:
-            usuario.id,
-
+        guild: interaction.guild,
+        tipo: TIPOS.BAN,
+        moderadorId: interaction.user.id,
+        usuarioId: usuario.id,
         motivo,
-
-        // ID da interação é único.
-        //
-        // Isso impede registrar dois
-        // casos para a mesma execução.
-
-        chaveEvento:
-            `ban_${interaction.id}`
+        chaveEvento: `ban_${interaction.id}`
     });
 }
 
-// ==========================================
-// COMANDO PRINCIPAL
-// ==========================================
+function mensagemErro(erro) {
+    if (erro instanceof ErroModeracao) {
+        return `❌ ${erro.message}`;
+    }
+
+    if (
+        erro.code === 50013 ||
+        erro.code === 50001
+    ) {
+        return (
+            '❌ O Discord recusou a operação. ' +
+            'Confira as permissões e a hierarquia dos cargos.'
+        );
+    }
+
+    if (erro.code === 10013) {
+        return '❌ Usuário não encontrado.';
+    }
+
+    if (erro.code === 10026) {
+        return '❌ Não foi possível consultar o banimento.';
+    }
+
+    return (
+        '❌ Não foi possível concluir o banimento. ' +
+        'Verifique os logs do bot.'
+    );
+}
 
 module.exports = {
-    data:
-        new SlashCommandBuilder()
-            .setName('ban')
-            .setDescription(
-                'Bane um usuário do servidor.'
-            )
-            .setDefaultMemberPermissions(
-                PermissionFlagsBits.BanMembers
-            )
-            .setDMPermission(false)
-
-            // ==================================
-            // USUÁRIO
-            // ==================================
-
-            .addUserOption(opcao =>
-                opcao
-                    .setName('usuario')
-                    .setDescription(
-                        'Usuário que será banido'
-                    )
-                    .setRequired(true)
-            )
-
-            // ==================================
-            // MOTIVO
-            // ==================================
-
-            .addStringOption(opcao =>
-                opcao
-                    .setName('motivo')
-                    .setDescription(
-                        'Motivo do banimento'
-                    )
-                    .setMaxLength(
-                        LIMITE_MOTIVO
-                    )
-                    .setRequired(false)
-            ),
-
-    // ======================================
-    // EXECUTAR COMANDO
-    // ======================================
+    data: new SlashCommandBuilder()
+        .setName('ban')
+        .setDescription(
+            'Bane um usuário do servidor.'
+        )
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.BanMembers
+        )
+        .setDMPermission(false)
+        .addUserOption(opcao =>
+            opcao
+                .setName('usuario')
+                .setDescription(
+                    'Usuário que será banido'
+                )
+                .setRequired(true)
+        )
+        .addStringOption(opcao =>
+            opcao
+                .setName('motivo')
+                .setDescription(
+                    'Motivo do banimento'
+                )
+                .setMaxLength(LIMITE_MOTIVO)
+                .setRequired(false)
+        ),
 
     async execute(interaction) {
-        const usuario =
-            interaction.options.getUser(
-                'usuario',
-                true
-            );
-
-        const motivo =
-            obterMotivo(interaction);
+        let banimentoExecutado = false;
 
         try {
-            // ==================================
-            // VERIFICAR PERMISSÕES
-            // ==================================
+            const usuario =
+                interaction.options.getUser(
+                    'usuario',
+                    true
+                );
+
+            const motivo = obterMotivo(
+                interaction
+            );
+
+            await interaction.deferReply({
+                flags: MessageFlags.Ephemeral
+            });
 
             await verificarPermissoes(
                 interaction,
                 usuario
             );
 
-            // ==================================
-            // ADIAR RESPOSTA
-            // ==================================
+            const jaBanido =
+                await verificarBanimentoExistente(
+                    interaction.guild,
+                    usuario.id
+                );
 
-            await interaction.deferReply({
-                flags: MessageFlags.Ephemeral
-            });
-
-            // ==================================
-            // VERIFICAR BANIMENTO EXISTENTE
-            // ==================================
-
-            let banimentoExistente = null;
-
-            try {
-                banimentoExistente =
-                    await interaction.guild.bans.fetch(
-                        usuario.id
-                    );
-
-            } catch (erro) {
-                // Código 10026:
-                // banimento desconhecido.
-                //
-                // Qualquer outro erro
-                // precisa ser tratado.
-
-                if (
-                    erro.code !== 10026
-                ) {
-                    throw erro;
-                }
-            }
-
-            if (banimentoExistente) {
+            if (jaBanido) {
                 await responderPrivado(
                     interaction,
-                    '⚠️ Esse usuário já está ' +
-                    'banido do servidor.'
+                    '⚠️ Esse usuário já está banido do servidor.'
                 );
 
                 return;
             }
 
-            // ==================================
-            // EXECUTAR BANIMENTO NO DISCORD
-            // ==================================
-
             await interaction.guild.members.ban(
                 usuario.id,
                 {
-                    reason:
-                        `InovareSale | ${motivo}`,
-
-                    // Não apagar mensagens
-                    // anteriores automaticamente.
+                    reason: `InovareSale | ${motivo}`,
                     deleteMessageSeconds: 0
                 }
             );
 
-            // ==================================
-            // REGISTRAR NO SQLITE
-            // ==================================
+            banimentoExecutado = true;
 
             let registro = null;
             let erroRegistro = null;
 
             try {
-                registro =
-                    await registrarBanimento(
-                        interaction,
-                        usuario,
-                        motivo
-                    );
-
+                registro = await registrarBanimento(
+                    interaction,
+                    usuario,
+                    motivo
+                );
             } catch (erro) {
                 erroRegistro = erro;
 
                 console.error(
-                    '[InovareSale | Ban] ' +
-                    'Banimento concluído, mas ' +
-                    'não registrado no SQLite:',
+                    '[InovareSale | Ban] Banimento executado, mas não registrado no SQLite:',
                     erro
                 );
             }
 
-            // ==================================
-            // EMBED DE CONFIRMAÇÃO
-            // ==================================
-
             const embed = criarEmbedBan({
                 usuario,
-
-                moderador:
-                    interaction.user,
-
+                moderador: interaction.user,
                 motivo,
-
-                casoId:
-                    registro?.caso?.id ||
-                    null,
-
-                logPublicado:
-                    registro?.log?.publicado ||
-                    false
+                casoId: registro?.caso?.id || null,
+                logPublicado: Boolean(
+                    registro?.log?.publicado
+                )
             });
-
-            // ==================================
-            // AVISAR FALHA DE REGISTRO
-            // ==================================
 
             let aviso = null;
 
             if (erroRegistro) {
                 aviso =
-                    '⚠️ O banimento foi realizado ' +
-                    'no Discord, mas houve uma ' +
-                    'falha ao salvar o histórico. ' +
-                    'Verifique o console do bot.';
-
+                    '⚠️ O banimento foi realizado no Discord, ' +
+                    'mas houve uma falha ao salvar o histórico. ' +
+                    'Verifique os logs do bot.';
             } else if (
                 registro?.erroLog ||
                 registro?.log?.publicado === false
             ) {
                 aviso =
-                    'ℹ️ Banimento registrado no ' +
-                    'SQLite. A publicação do log ' +
-                    'está pendente.';
+                    'ℹ️ O banimento foi registrado no SQLite, ' +
+                    'mas o envio ao canal de logs está pendente.';
             }
 
-            // ==================================
-            // RESPONDER AO MODERADOR
-            // ==================================
+            const resposta = {
+                embeds: [embed]
+            };
+
+            if (aviso) {
+                resposta.content = aviso;
+            }
 
             await responderPrivado(
                 interaction,
-                {
-                    content: aviso,
-                    embeds: [embed]
-                }
+                resposta
             );
 
+            console.log(
+                `[InovareSale | Ban] Usuário ${usuario.id} banido pelo moderador ${interaction.user.id}.`
+            );
         } catch (erro) {
             console.error(
                 '[InovareSale | Ban] Erro:',
                 erro
             );
 
-            // ==================================
-            // TRATAR FALHA DE PERMISSÃO
-            // ==================================
-
-            let mensagem =
-                '❌ Não foi possível banir ' +
-                'esse usuário.';
-
-            if (
-                erro.code === 50013 ||
-                erro.code === 50001
-            ) {
-                mensagem =
-                    '❌ O Discord recusou a ação. ' +
-                    'Confira as permissões e a ' +
-                    'hierarquia dos cargos.';
-
-            } else if (
-                erro.code === 10013
-            ) {
-                mensagem =
-                    '❌ Usuário não encontrado.';
-
-            } else if (
-                !erro.code &&
-                erro.message
-            ) {
-                mensagem =
-                    `❌ ${String(
-                        erro.message
-                    ).slice(0, 500)}`;
-            }
+            const mensagem = banimentoExecutado
+                ? (
+                    '⚠️ O usuário foi banido, mas ocorreu ' +
+                    'uma falha ao enviar a confirmação. ' +
+                    'Verifique o histórico e os logs.'
+                )
+                : mensagemErro(erro);
 
             try {
                 await responderPrivado(
                     interaction,
                     mensagem
                 );
-
             } catch (erroResposta) {
                 console.error(
-                    '[InovareSale | Ban] ' +
-                    'Falha ao responder:',
+                    '[InovareSale | Ban] Falha ao responder:',
                     erroResposta
                 );
             }
