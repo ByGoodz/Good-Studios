@@ -3,76 +3,39 @@
 
 const {
     EmbedBuilder,
-    GatewayIntentBits
+    GatewayIntentBits,
+    ContainerBuilder,
+    TextDisplayBuilder,
+    SeparatorBuilder,
+    ActionRowBuilder,
+    StringSelectMenuBuilder,
+    UserSelectMenuBuilder,
+    MessageFlags
 } = require('discord.js');
 
-const {
-    db
-} = require('../database/db');
+const { db } = require('../database/db');
+const { getConfig, saveConfig } = require('../utils/storage');
+const { obterResumoConvites } = require('./convitesService');
 
 const {
-    getConfig,
-    saveConfig
-} = require('../utils/storage');
-
-const {
-    obterResumoConvites
-} = require('./convitesService');
-
-const {
-    obterResumoModeracao
+    obterResumoModeracao,
+    obterRankingModeracaoPeriodo,
+    obterModeracaoFuncionarioPeriodo
 } = require('./moderacaoService');
 
 const {
-    obterResumoEquipe
+    obterResumoEquipe,
+    obterRankingVozPeriodo,
+    obterVozFuncionarioPeriodo
 } = require('./staffService');
 
-// ==========================================
-// INOVARESALE BOT 3.0
-// SERVIÇO DE STATUS DO SERVIDOR
-// ==========================================
+const VERSAO = '3.1.0';
+const INTERVALO_ATUALIZACAO = 30 * 60 * 1000;
+const INICIO_RANKING = Math.floor(Date.UTC(2026, 9, 14, 3) / 1000);
 
-// FUNCIONALIDADES:
-//
-// - Um painel por servidor
-// - Atualização a cada 60 minutos
-// - Editar mensagem existente
-// - Status verde, amarelo ou vermelho
-// - Tempo online do bot
-// - Latência da conexão
-// - Estatísticas reais de tickets
-// - Funcionários em canais de voz
-// - Convites identificados
-// - Estatísticas de moderação
-// - Persistência do ID da mensagem
-// - Evitar atualizações simultâneas
-// - Preservar configurações existentes
-//
-// IMPORTANTE:
-//
-// Quando não for possível consultar
-// alguma informação, o painel mostrará
-// "Indisponível".
-//
-// Não inventamos números.
-//
-// O histórico permanece nos serviços
-// e tabelas SQLite já existentes.
-
-// ==========================================
-// CONFIGURAÇÕES
-// ==========================================
-
-const VERSAO = '3.0.0';
-
-const INTERVALO_ATUALIZACAO =
-    60 * 60 * 1000;
-
-const CORES = Object.freeze({
-    NORMAL: 0x22C55E,
-    ATENCAO: 0xFACC15,
-    PROBLEMA: 0xEF4444
-});
+const RESULTADOS = new Map();
+const SERVIDORES_ATUALIZANDO = new Set();
+const PREMIACOES_PROCESSANDO = new Set();
 
 const ESTADOS = Object.freeze({
     NORMAL: 'normal',
@@ -80,181 +43,100 @@ const ESTADOS = Object.freeze({
     PROBLEMA: 'problema'
 });
 
-// ==========================================
-// CONTROLES INTERNOS
-// ==========================================
+const CORES = Object.freeze({
+    NORMAL: 0x22C55E,
+    ATENCAO: 0xFACC15,
+    PROBLEMA: 0xEF4444
+});
 
 let timerStatus = null;
-
 let clienteMonitorado = null;
-
 let atualizacaoGeralEmAndamento = false;
 
-const SERVIDORES_ATUALIZANDO =
-    new Set();
+db.exec(`
+    CREATE TABLE IF NOT EXISTS staff_premiacoes_mensais_v31 (
+        servidor_id TEXT NOT NULL,
+        inicio_em INTEGER NOT NULL,
+        fim_em INTEGER NOT NULL,
+        vencedor_id TEXT,
+        pontos INTEGER NOT NULL DEFAULT 0,
+        anunciado_em INTEGER,
+        PRIMARY KEY (servidor_id, inicio_em)
+    );
+`);
 
-const RESULTADOS = new Map();
+const SQL_PREMIOS = {
+    obter: db.prepare(`
+        SELECT * FROM staff_premiacoes_mensais_v31
+        WHERE servidor_id = ? AND inicio_em = ?
+    `),
 
-// ==========================================
-// FORMATAÇÕES
-// ==========================================
+    inserir: db.prepare(`
+        INSERT OR IGNORE INTO staff_premiacoes_mensais_v31
+        (servidor_id, inicio_em, fim_em, vencedor_id, pontos)
+        VALUES (?, ?, ?, ?, ?)
+    `),
+
+    marcar: db.prepare(`
+        UPDATE staff_premiacoes_mensais_v31
+        SET anunciado_em = ?
+        WHERE servidor_id = ? AND inicio_em = ? AND anunciado_em IS NULL
+    `)
+};
+
+function idValido(valor) {
+    const texto = String(valor ?? '').trim();
+
+    return /^\d{15,22}$/.test(texto)
+        ? texto
+        : null;
+}
 
 function formatarNumero(valor) {
     const numero = Number(valor);
 
-    if (
-        !Number.isFinite(numero) ||
-        numero < 0
-    ) {
-        return 'Indisponível';
-    }
-
-    return Math.floor(numero)
-        .toLocaleString('pt-BR');
+    return Number.isFinite(numero) && numero >= 0
+        ? Math.floor(numero).toLocaleString('pt-BR')
+        : 'Indisponível';
 }
 
 function formatarDuracao(segundos) {
     const total = Math.max(
         0,
-        Math.floor(
-            Number(segundos) || 0
-        )
+        Math.floor(Number(segundos) || 0)
     );
 
-    const dias = Math.floor(
-        total / 86400
-    );
+    const dias = Math.floor(total / 86400);
+    const horas = Math.floor((total % 86400) / 3600);
+    const minutos = Math.floor((total % 3600) / 60);
 
-    const horas = Math.floor(
-        (total % 86400) / 3600
-    );
-
-    const minutos = Math.floor(
-        (total % 3600) / 60
-    );
-
-    const partes = [];
-
-    if (dias > 0) {
-        partes.push(`${dias}d`);
-    }
-
-    if (horas > 0) {
-        partes.push(`${horas}h`);
-    }
-
-    if (minutos > 0) {
-        partes.push(`${minutos}min`);
-    }
-
-    if (!partes.length) {
-        partes.push(
-            `${total % 60}s`
-        );
-    }
-
-    return partes.join(' ');
+    return [
+        dias && `${dias}d`,
+        horas && `${horas}h`,
+        minutos && `${minutos}min`
+    ].filter(Boolean).join(' ') || `${total % 60}s`;
 }
 
-function textoDisponivel(
-    valor,
-    sufixo = ''
-) {
-    if (
-        valor === null ||
-        valor === undefined
-    ) {
-        return 'Indisponível';
-    }
+function limitarTexto(valor, limite = 1500) {
+    const texto = String(valor ?? '');
 
-    const numero = Number(valor);
-
-    if (
-        !Number.isFinite(numero) ||
-        numero < 0
-    ) {
-        return 'Indisponível';
-    }
-
-    return (
-        formatarNumero(numero) +
-        sufixo
-    );
+    return texto.length > limite
+        ? `${texto.slice(0, limite - 3)}...`
+        : texto;
 }
-
-function limitarTexto(
-    valor,
-    limite = 1024
-) {
-    const texto = String(
-        valor ?? ''
-    );
-
-    if (texto.length <= limite) {
-        return texto;
-    }
-
-    return texto.slice(
-        0,
-        limite - 3
-    ) + '...';
-}
-
-// ==========================================
-// IDENTIFICAR CONFIGURAÇÃO
-// ==========================================
 
 function carregarConfigStatus() {
     const config = getConfig();
 
     return {
         config,
-
-        status:
-            config.status || {},
-
-        staff:
-            config.staff || {}
+        status: config.status || {},
+        staff: config.staff || {}
     };
 }
 
-function idValido(valor) {
-    const texto = String(
-        valor ?? ''
-    ).trim();
-
-    return /^\d{15,22}$/.test(
-        texto
-    )
-        ? texto
-        : null;
-}
-
-// ==========================================
-// ESTATÍSTICAS DE TICKETS
-// ==========================================
-
-// Os estados utilizados vêm do
-// services/ticketService.js:
-//
-// criando
-// aberto
-// em_atendimento
-// finalizando
-// finalizado
-// cancelado
-//
-// Conta apenas tickets do servidor.
-//
-// Não consulta valores financeiros,
-// portanto não mistura pedidos
-// com vendas efetivamente concluídas.
-
-function obterResumoTicketsStatus(
-    servidorId
-) {
-    const servidor =
-        idValido(servidorId);
+function obterResumoTicketsStatus(servidorId) {
+    const servidor = idValido(servidorId);
 
     if (!servidor) {
         return {
@@ -265,588 +147,285 @@ function obterResumoTicketsStatus(
 
     try {
         const resultado = db.prepare(`
-            SELECT
-                COUNT(*) AS total,
-
-                COALESCE(SUM(
-                    CASE
-                        WHEN status = 'criando'
-                        THEN 1 ELSE 0
-                    END
-                ), 0) AS criando,
-
-                COALESCE(SUM(
-                    CASE
-                        WHEN status = 'aberto'
-                        THEN 1 ELSE 0
-                    END
-                ), 0) AS abertos,
-
-                COALESCE(SUM(
-                    CASE
-                        WHEN status = 'em_atendimento'
-                        THEN 1 ELSE 0
-                    END
-                ), 0) AS em_atendimento,
-
-                COALESCE(SUM(
-                    CASE
-                        WHEN status = 'finalizando'
-                        THEN 1 ELSE 0
-                    END
-                ), 0) AS finalizando,
-
-                COALESCE(SUM(
-                    CASE
-                        WHEN status = 'finalizado'
-                        THEN 1 ELSE 0
-                    END
-                ), 0) AS finalizados,
-
-                COALESCE(SUM(
-                    CASE
-                        WHEN status = 'cancelado'
-                        THEN 1 ELSE 0
-                    END
-                ), 0) AS cancelados
-
+            SELECT COUNT(*) AS total,
+                SUM(CASE WHEN status = 'criando' THEN 1 ELSE 0 END) AS criando,
+                SUM(CASE WHEN status = 'aberto' THEN 1 ELSE 0 END) AS abertos,
+                SUM(CASE WHEN status = 'em_atendimento' THEN 1 ELSE 0 END) AS em_atendimento,
+                SUM(CASE WHEN status = 'finalizando' THEN 1 ELSE 0 END) AS finalizando,
+                SUM(CASE WHEN status = 'finalizado' THEN 1 ELSE 0 END) AS finalizados,
+                SUM(CASE WHEN status = 'cancelado' THEN 1 ELSE 0 END) AS cancelados
             FROM tickets
-
             WHERE servidor_id = ?
         `).get(servidor);
 
-        const criando =
-            Number(resultado?.criando || 0);
-
-        const abertos =
-            Number(resultado?.abertos || 0);
-
-        const emAtendimento =
-            Number(
-                resultado?.em_atendimento || 0
-            );
-
-        const finalizando =
-            Number(
-                resultado?.finalizando || 0
-            );
-
-        return {
+        const dados = {
             disponivel: true,
-
-            total:
-                Number(resultado?.total || 0),
-
-            criando,
-            abertos,
-            emAtendimento,
-            finalizando,
-
-            ativos:
-                criando +
-                abertos +
-                emAtendimento +
-                finalizando,
-
-            finalizados:
-                Number(
-                    resultado?.finalizados || 0
-                ),
-
-            cancelados:
-                Number(
-                    resultado?.cancelados || 0
-                )
+            total: Number(resultado?.total || 0),
+            criando: Number(resultado?.criando || 0),
+            abertos: Number(resultado?.abertos || 0),
+            emAtendimento: Number(resultado?.em_atendimento || 0),
+            finalizando: Number(resultado?.finalizando || 0),
+            finalizados: Number(resultado?.finalizados || 0),
+            cancelados: Number(resultado?.cancelados || 0)
         };
 
+        dados.ativos =
+            dados.criando +
+            dados.abertos +
+            dados.emAtendimento +
+            dados.finalizando;
+
+        return dados;
     } catch (erro) {
         console.error(
-            '[InovareSale | Status] ' +
-            'Erro ao consultar tickets:',
+            '[InovareSale | Status] Erro ao consultar tickets:',
             erro
         );
 
         return {
             disponivel: false,
-            motivo:
-                'Falha ao consultar tickets'
+            motivo: 'Estatísticas de tickets indisponíveis'
         };
     }
 }
 
-// ==========================================
-// FUNCIONÁRIOS EM CANAIS DE VOZ
-// ==========================================
-
-// Utiliza o cargo configurado em:
-//
-// config.staff.cargoId
-//
-// Conta somente membros com o cargo
-// da equipe que estejam conectados
-// em algum canal de voz.
-//
-// Se não houver cargo configurado,
-// não mostra um zero enganoso.
-//
-// Se algum membro estiver sem dados
-// suficientes no cache, essa contagem
-// fica marcada como parcial.
-
-function obterEquipeEmVoz(
-    guild,
-    config = null
-) {
+function obterEquipeEmVoz(guild, config = null) {
     if (!guild?.id) {
         return {
             disponivel: false,
-            motivo:
-                'Servidor indisponível'
+            motivo: 'Servidor indisponível'
         };
     }
 
-    const configuracao =
-        config || getConfig();
-
     const cargoId = idValido(
-        configuracao.staff?.cargoId
+        (config || getConfig()).staff?.cargoId
     );
 
     if (!cargoId) {
         return {
             disponivel: false,
             configurado: false,
-            motivo:
-                'Cargo da equipe não configurado'
+            motivo: 'Cargo da equipe não configurado'
         };
     }
 
-    const client = guild.client;
-
     if (
-        !client?.options?.intents?.has(
+        !guild.client?.options?.intents?.has(
             GatewayIntentBits.GuildVoiceStates
         )
     ) {
         return {
             disponivel: false,
             configurado: true,
-            motivo:
-                'Intent de voz não habilitado'
+            motivo: 'Intent de voz não habilitado'
         };
     }
 
-    let quantidade = 0;
+    const membros = [];
     let membrosSemDados = 0;
 
-    const membros = [];
-
-    for (
-        const estado
-        of guild.voiceStates.cache.values()
-    ) {
-        if (!estado.channelId) {
-            continue;
-        }
+    for (const estado of guild.voiceStates.cache.values()) {
+        if (!estado.channelId) continue;
 
         const membro =
             estado.member ||
-            guild.members.cache.get(
-                estado.id
-            );
+            guild.members.cache.get(estado.id);
 
         if (!membro) {
             membrosSemDados++;
             continue;
         }
 
-        if (membro.user?.bot) {
-            continue;
-        }
-
         if (
-            !membro.roles?.cache?.has(
-                cargoId
-            )
+            !membro.user?.bot &&
+            membro.roles?.cache?.has(cargoId)
         ) {
-            continue;
+            membros.push({
+                membroId: membro.id,
+                canalId: estado.channelId
+            });
         }
-
-        quantidade++;
-
-        membros.push({
-            membroId: membro.id,
-            canalId:
-                estado.channelId
-        });
     }
 
     return {
-        disponivel:
-            membrosSemDados === 0,
-
+        disponivel: membrosSemDados === 0,
         configurado: true,
-
-        quantidade,
-
-        parcial:
-            membrosSemDados > 0,
-
+        quantidade: membros.length,
+        parcial: membrosSemDados > 0,
         membrosSemDados,
-
         membros,
-
-        motivo:
-            membrosSemDados > 0
-                ? 'Existem membros sem dados suficientes no cache'
-                : null
+        motivo: membrosSemDados
+            ? 'Contagem parcial da equipe em voz'
+            : null
     };
 }
 
-// ==========================================
-// RESUMO DA EQUIPE NO SQLITE
-// ==========================================
-
-// O staffService guarda sessões
-// de funcionários.
-//
-// A contagem atual é observada
-// diretamente no Discord.
-//
-// O histórico é consultado
-// separadamente para não confundir
-// presença atual com tempo acumulado.
-
-async function obterResumoEquipeStatus(
-    guild,
-    config
-) {
-    const presenca =
-        obterEquipeEmVoz(
-            guild,
-            config
-        );
-
-    let historico = null;
+async function obterResumoEquipeStatus(guild, config) {
+    const presenca = obterEquipeEmVoz(guild, config);
 
     try {
-        historico =
-            await obterResumoEquipe(
-                guild
-            );
+        const historico = await obterResumoEquipe(guild);
 
+        return {
+            ...presenca,
+            historico
+        };
     } catch (erro) {
         console.warn(
-            '[InovareSale | Status] ' +
-            'Histórico da equipe indisponível:',
+            '[InovareSale | Status] Histórico de voz indisponível:',
             erro.message
         );
+
+        return {
+            ...presenca,
+            historico: null
+        };
     }
-
-    return {
-        ...presenca,
-
-        historico
-    };
 }
 
-// ==========================================
-// RESUMO DE CONVITES
-// ==========================================
-
-function obterResumoConvitesStatus(
-    servidorId
-) {
+function obterResumoConvitesStatus(servidorId) {
     try {
-        const resultado =
-            obterResumoConvites(
-                servidorId
-            );
+        const resultado = obterResumoConvites(servidorId);
 
-        if (
-            !resultado ||
-            resultado.disponivel === false
-        ) {
+        if (!resultado || resultado.disponivel === false) {
             return {
                 disponivel: false,
-                motivo:
-                    resultado?.descricao ||
-                    'Aguardando sincronização'
+                motivo: resultado?.descricao || 'Aguardando convites'
             };
         }
 
         return {
             disponivel: true,
-
-            confirmados:
-                Number(
-                    resultado.quantidade || 0
-                ),
-
-            linksAtivos:
-                Number(
-                    resultado.linksAtivos || 0
-                ),
-
-            naoIdentificados:
-                Number(
-                    resultado.naoIdentificados || 0
-                )
+            confirmados: Number(resultado.quantidade || 0),
+            linksAtivos: Number(resultado.linksAtivos || 0),
+            naoIdentificados: Number(resultado.naoIdentificados || 0)
         };
-
     } catch (erro) {
         console.error(
-            '[InovareSale | Status] ' +
-            'Erro ao consultar convites:',
+            '[InovareSale | Status] Erro ao consultar convites:',
             erro
         );
 
         return {
             disponivel: false,
-            motivo:
-                'Falha ao consultar convites'
+            motivo: 'Dados de convites indisponíveis'
         };
     }
 }
 
-// ==========================================
-// RESUMO DE MODERAÇÃO
-// ==========================================
-
-function obterResumoModeracaoStatus(
-    servidorId
-) {
+function obterResumoModeracaoStatus(servidorId) {
     try {
-        const resultado =
-            obterResumoModeracao(
-                servidorId
-            );
+        const resultado = obterResumoModeracao(servidorId);
 
         if (!resultado?.disponivel) {
             return {
-                disponivel: false,
-                motivo:
-                    'Moderação indisponível'
+                disponivel: false
             };
         }
 
         return {
             disponivel: true,
-
-            total:
-                Number(
-                    resultado.quantidade || 0
-                ),
-
-            bans:
-                Number(
-                    resultado.banimentos || 0
-                ),
-
-            warns:
-                Number(
-                    resultado.advertencias || 0
-                ),
-
-            warnsAtivas:
-                Number(
-                    resultado.advertenciasAtivas || 0
-                ),
-
-            timeouts:
-                Number(
-                    resultado.timeouts || 0
-                ),
-
-            acoesTotais:
-                Number(
-                    resultado.acoesTotais || 0
-                )
+            total: Number(resultado.quantidade || 0),
+            bans: Number(resultado.banimentos || 0),
+            warns: Number(resultado.advertencias || 0),
+            warnsAtivas: Number(resultado.advertenciasAtivas || 0),
+            timeouts: Number(resultado.timeouts || 0),
+            acoesTotais: Number(resultado.acoesTotais || 0)
         };
-
     } catch (erro) {
         console.error(
-            '[InovareSale | Status] ' +
-            'Erro ao consultar moderação:',
+            '[InovareSale | Status] Erro ao consultar moderação:',
             erro
         );
 
         return {
-            disponivel: false,
-            motivo:
-                'Falha ao consultar moderação'
+            disponivel: false
         };
     }
 }
-
-// ==========================================
-// SAÚDE DO SISTEMA
-// ==========================================
-
-// NORMAL:
-// - Bot conectado
-// - SQLite acessível
-// - Métricas consultáveis
-//
-// ATENÇÃO:
-// - Serviço secundário indisponível
-// - Alguma configuração faltando
-// - Latência elevada
-//
-// PROBLEMA:
-// - Bot desconectado
-// - Banco indisponível
-// - Latência extremamente elevada
-//
-// Nenhum desses estados representa
-// o status do site Roblox ou do
-// processamento externo de pagamentos.
 
 function obterSaudeSistema(
     client,
     {
-        tickets = null,
-        equipe = null,
-        convites = null,
-        moderacao = null
+        tickets,
+        equipe,
+        convites,
+        moderacao
     } = {}
 ) {
     const problemas = [];
     const avisos = [];
 
-    const conectado =
-        Boolean(
-            client?.isReady?.()
-        );
+    const conectado = Boolean(client?.isReady?.());
+    const bancoDisponivel = Boolean(db.open);
 
-    const bancoDisponivel =
-        Boolean(
-            db.open
-        );
-
-    const ping = Number(
-        client?.ws?.ping
-    );
-
-    const pingValido =
-        Number.isFinite(ping) &&
-        ping >= 0;
+    const ping = Number(client?.ws?.ping);
+    const pingValido = Number.isFinite(ping) && ping >= 0;
 
     if (!conectado) {
-        problemas.push(
-            'Conexão com o Discord indisponível'
-        );
+        problemas.push('Discord desconectado');
     }
 
     if (!bancoDisponivel) {
-        problemas.push(
-            'Banco SQLite indisponível'
-        );
+        problemas.push('SQLite indisponível');
     }
 
-    if (
-        pingValido &&
-        ping >= 2000
-    ) {
-        problemas.push(
-            'Latência crítica do Discord'
-        );
+    if (pingValido && ping >= 2000) {
+        problemas.push('Latência crítica');
+    } else if (pingValido && ping >= 1000) {
+        avisos.push('Latência elevada');
+    }
 
-    } else if (
-        pingValido &&
-        ping >= 1000
-    ) {
+    if (tickets && !tickets.disponivel) {
+        avisos.push('Dados de tickets indisponíveis');
+    }
+
+    if (equipe && !equipe.disponivel) {
         avisos.push(
-            'Latência elevada do Discord'
+            equipe.motivo || 'Dados da equipe indisponíveis'
         );
     }
 
-    if (
-        tickets &&
-        !tickets.disponivel
-    ) {
-        avisos.push(
-            'Estatísticas de tickets indisponíveis'
-        );
+    if (convites && !convites.disponivel) {
+        avisos.push('Dados de convites indisponíveis');
     }
 
-    if (
-        equipe &&
-        !equipe.disponivel
-    ) {
-        avisos.push(
-            equipe.motivo ||
-            'Equipe em voz indisponível'
-        );
+    if (moderacao && !moderacao.disponivel) {
+        avisos.push('Dados de moderação indisponíveis');
     }
 
-    if (
-        convites &&
-        !convites.disponivel
-    ) {
-        avisos.push(
-            'Convites ainda não disponíveis'
-        );
-    }
-
-    if (
-        moderacao &&
-        !moderacao.disponivel
-    ) {
-        avisos.push(
-            'Estatísticas de moderação indisponíveis'
-        );
-    }
-
-    let estado = ESTADOS.NORMAL;
-
-    if (problemas.length) {
-        estado = ESTADOS.PROBLEMA;
-
-    } else if (avisos.length) {
-        estado = ESTADOS.ATENCAO;
-    }
+    const estado = problemas.length
+        ? ESTADOS.PROBLEMA
+        : avisos.length
+            ? ESTADOS.ATENCAO
+            : ESTADOS.NORMAL;
 
     return {
         estado,
-
-        cor:
+        cor: CORES[
             estado === ESTADOS.NORMAL
-                ? CORES.NORMAL
+                ? 'NORMAL'
                 : estado === ESTADOS.ATENCAO
-                    ? CORES.ATENCAO
-                    : CORES.PROBLEMA,
-
-        icone:
-            estado === ESTADOS.NORMAL
-                ? '🟢'
-                : estado === ESTADOS.ATENCAO
-                    ? '🟡'
-                    : '🔴',
-
-        descricao:
-            estado === ESTADOS.NORMAL
-                ? 'Funcionamento normal'
-                : estado === ESTADOS.ATENCAO
-                    ? 'Alguns dados precisam de atenção'
-                    : 'Problema detectado',
-
+                    ? 'ATENCAO'
+                    : 'PROBLEMA'
+        ],
+        icone: estado === ESTADOS.NORMAL
+            ? '🟢'
+            : estado === ESTADOS.ATENCAO
+                ? '🟡'
+                : '🔴',
+        descricao: estado === ESTADOS.NORMAL
+            ? 'Funcionamento normal'
+            : estado === ESTADOS.ATENCAO
+                ? 'Alguns dados precisam de atenção'
+                : 'Problema detectado',
         conectado,
         bancoDisponivel,
-
-        ping:
-            pingValido
-                ? Math.round(ping)
-                : null,
-
+        ping: pingValido ? Math.round(ping) : null,
         problemas,
         avisos
     };
 }
-
-// ==========================================
-// COLETAR DADOS DO PAINEL
-// ==========================================
 
 async function obterDadosStatus(
     guild,
@@ -858,475 +437,1082 @@ async function obterDadosStatus(
         );
     }
 
-    const {
+    const { config } = carregarConfigStatus();
+
+    const tickets = obterResumoTicketsStatus(
+        guild.id
+    );
+
+    const equipe = await obterResumoEquipeStatus(
+        guild,
         config
-    } = carregarConfigStatus();
+    );
 
-    const tickets =
-        obterResumoTicketsStatus(
-            guild.id
-        );
+    const convites = obterResumoConvitesStatus(
+        guild.id
+    );
 
-    const equipe =
-        await obterResumoEquipeStatus(
-            guild,
-            config
-        );
+    const moderacao = obterResumoModeracaoStatus(
+        guild.id
+    );
 
-    const convites =
-        obterResumoConvitesStatus(
-            guild.id
-        );
-
-    const moderacao =
-        obterResumoModeracaoStatus(
-            guild.id
-        );
-
-    const saude =
-        obterSaudeSistema(
-            client,
-            {
-                tickets,
-                equipe,
-                convites,
-                moderacao
-            }
-        );
-
-    const uptimeMilissegundos =
-        Number(
-            client?.uptime || 0
-        );
-
-    const uptimeSegundos =
-        Math.max(
-            0,
-            Math.floor(
-                uptimeMilissegundos / 1000
-            )
-        );
+    const saude = obterSaudeSistema(client, {
+        tickets,
+        equipe,
+        convites,
+        moderacao
+    });
 
     return {
-        servidorId:
-            guild.id,
-
-        nomeServidor:
-            guild.name,
-
+        servidorId: guild.id,
+        nomeServidor: guild.name,
         tickets,
         equipe,
         convites,
         moderacao,
         saude,
-
-        uptimeSegundos,
-
-        atualizadoEm:
-            Date.now()
+        uptimeSegundos: Math.max(
+            0,
+            Math.floor(Number(client?.uptime || 0) / 1000)
+        ),
+        atualizadoEm: Date.now()
     };
 }
 
-// ==========================================
-// TEXTO DOS TICKETS
-// ==========================================
-
-function criarTextoTickets(
-    tickets
-) {
-    if (!tickets.disponivel) {
-        return (
-            '⚪ Estatísticas indisponíveis'
-        );
-    }
-
-    return [
-        `📨 **Pedidos ativos:** ${
-            formatarNumero(
-                tickets.ativos
-            )
-        }`,
-
-        `🆕 Em criação: ${
-            formatarNumero(
-                tickets.criando
-            )
-        }`,
-
-        `📂 Abertos: ${
-            formatarNumero(
-                tickets.abertos
-            )
-        }`,
-
-        `👤 Em atendimento: ${
-            formatarNumero(
-                tickets.emAtendimento
-            )
-        }`,
-
-        `⏳ Finalizando: ${
-            formatarNumero(
-                tickets.finalizando
-            )
-        }`,
-
-        `✅ Finalizados: ${
-            formatarNumero(
-                tickets.finalizados
-            )
-        }`,
-
-        `❌ Cancelados: ${
-            formatarNumero(
-                tickets.cancelados
-            )
-        }`
-    ].join('\n');
-}
-
-// ==========================================
-// TEXTO DA EQUIPE
-// ==========================================
-
-function criarTextoEquipe(
-    equipe
-) {
-    if (!equipe.configurado) {
-        return (
-            '⚪ Cargo da equipe não configurado'
-        );
-    }
-
-    const linhas = [];
-
-    if (
-        equipe.disponivel ||
-        equipe.parcial
-    ) {
-        linhas.push(
-            `🎙️ **Funcionários em call:** ${
-                formatarNumero(
-                    equipe.quantidade
-                )
-            }${
-                equipe.parcial
-                    ? ' (contagem parcial)'
-                    : ''
-            }`
-        );
-    } else {
-        linhas.push(
-            '🎙️ **Funcionários em call:** ' +
-            'Indisponível'
-        );
-    }
-
-    const historico =
-        equipe.historico;
-
-    if (
-        historico &&
-        typeof historico === 'object'
-    ) {
-        const segundos =
-            historico.tempoTotalSegundos ??
-            historico.segundosTotais ??
-            historico.tempoTotalVozSegundos;
-
-        if (
-            segundos !== null &&
-            segundos !== undefined &&
-            Number.isFinite(
-                Number(segundos)
-            )
-        ) {
-            linhas.push(
-                `⏱️ Tempo registrado: ${
-                    formatarDuracao(
-                        segundos
-                    )
-                }`
-            );
+function partesDataBrasil(data = new Date()) {
+    const partes = new Intl.DateTimeFormat(
+        'en-US',
+        {
+            timeZone: 'America/Sao_Paulo',
+            year: 'numeric',
+            month: 'numeric',
+            day: 'numeric'
         }
-    }
+    ).formatToParts(data);
 
-    return linhas.join('\n');
+    const obter = tipo => Number(
+        partes.find(item => item.type === tipo)?.value
+    );
+
+    return {
+        ano: obter('year'),
+        mes: obter('month'),
+        dia: obter('day')
+    };
 }
 
-// ==========================================
-// TEXTO DOS CONVITES
-// ==========================================
+function obterPeriodoMensal(data = new Date()) {
+    const local = partesDataBrasil(data);
 
-function criarTextoConvites(
-    convites
+    const mesInicio = local.dia >= 14
+        ? local.mes - 1
+        : local.mes - 2;
+
+    const inicioCalculado = Math.floor(
+        Date.UTC(local.ano, mesInicio, 14, 3) / 1000
+    );
+
+    const inicio = Math.max(
+        INICIO_RANKING,
+        inicioCalculado
+    );
+
+    const fim = inicioCalculado < INICIO_RANKING
+        ? Math.floor(Date.UTC(2026, 10, 14, 3) / 1000)
+        : Math.floor(
+            Date.UTC(
+                local.ano,
+                mesInicio + 1,
+                14,
+                3
+            ) / 1000
+        );
+
+    return {
+        inicio,
+        fim,
+        iniciado: inicioCalculado >= INICIO_RANKING,
+        rotulo:
+            `${formatarData(inicio)} a ${formatarData(fim)}`
+    };
+}
+
+function formatarData(timestamp) {
+    return new Intl.DateTimeFormat(
+        'pt-BR',
+        {
+            timeZone: 'America/Sao_Paulo',
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric'
+        }
+    ).format(new Date(timestamp * 1000));
+}
+
+function pesosRanking(config = getConfig()) {
+    const pesos = config.status?.rankingPesos || {};
+
+    const seguro = (valor, padrao) =>
+        Number.isSafeInteger(valor) &&
+        valor >= 0 &&
+        valor <= 1000
+            ? valor
+            : padrao;
+
+    return {
+        warn: seguro(pesos.warn, 10),
+        ban: seguro(pesos.ban, 20),
+        dezMinutosVoz: seguro(
+            pesos.dezMinutosVoz,
+            1
+        ),
+        dezMinutosAtendimento: seguro(
+            pesos.dezMinutosAtendimento,
+            3
+        )
+    };
+}
+
+async function buscarMembroEquipe(
+    guild,
+    id,
+    cargoId
 ) {
-    if (!convites.disponivel) {
+    try {
+        const membro =
+            guild.members.cache.get(id) ||
+            await guild.members.fetch(id);
+
         return (
-            '⚪ Aguardando dados de convites'
-        );
+            !membro.user?.bot &&
+            membro.roles.cache.has(cargoId)
+        )
+            ? membro
+            : null;
+    } catch {
+        return null;
     }
-
-    return [
-        `🔗 **Convites confirmados:** ${
-            formatarNumero(
-                convites.confirmados
-            )
-        }`,
-
-        `👥 Entradas sem identificação: ${
-            formatarNumero(
-                convites.naoIdentificados
-            )
-        }`,
-
-        `📨 Links ativos: ${
-            formatarNumero(
-                convites.linksAtivos
-            )
-        }`
-    ].join('\n');
 }
 
-// ==========================================
-// TEXTO DA MODERAÇÃO
-// ==========================================
-
-function criarTextoModeracao(
-    moderacao
+async function obterRankingMensal(
+    guild,
+    periodo = obterPeriodoMensal()
 ) {
-    if (!moderacao.disponivel) {
-        return (
-            '⚪ Estatísticas indisponíveis'
-        );
+    const config = getConfig();
+
+    const cargoId = idValido(
+        config.staff?.cargoId
+    );
+
+    if (!cargoId) {
+        return {
+            disponivel: false,
+            motivo: 'Cargo da equipe não configurado',
+            periodo,
+            ranking: []
+        };
     }
 
-    return [
-        `🔨 **Banimentos:** ${
-            formatarNumero(
-                moderacao.bans
-            )
-        }`,
-
-        `⚠️ Advertências aplicadas: ${
-            formatarNumero(
-                moderacao.warns
-            )
-        }`,
-
-        `🟡 Advertências ativas: ${
-            formatarNumero(
-                moderacao.warnsAtivas
-            )
-        }`,
-
-        `🔇 Timeouts aplicados: ${
-            formatarNumero(
-                moderacao.timeouts
-            )
-        }`
-    ].join('\n');
-}
-
-// ==========================================
-// CRIAR EMBED DE STATUS
-// ==========================================
-
-function criarEmbedStatus(
-    dados
-) {
-    if (!dados?.saude) {
-        throw new Error(
-            'Dados do painel de status inválidos.'
-        );
+    if (!periodo.iniciado) {
+        return {
+            disponivel: false,
+            motivo: 'A contagem começa em 14/10/2026',
+            periodo,
+            ranking: []
+        };
     }
 
-    const saude =
-        dados.saude;
+    const fim = Math.min(
+        periodo.fim,
+        Math.floor(Date.now() / 1000)
+    );
 
-    const ping =
-        saude.ping === null
-            ? 'Indisponível'
-            : `${saude.ping} ms`;
+    if (fim <= periodo.inicio) {
+        return {
+            disponivel: true,
+            periodo,
+            ranking: [],
+            pesos: pesosRanking(config)
+        };
+    }
 
-    const uptime =
-        formatarDuracao(
-            dados.uptimeSegundos
-        );
+    const voz = obterRankingVozPeriodo(
+        guild.id,
+        periodo.inicio,
+        fim,
+        100
+    );
 
-    const titulo =
-        `${saude.icone} INOVARESALE | STATUS`;
+    const moderacao = obterRankingModeracaoPeriodo(
+        guild.id,
+        periodo.inicio,
+        fim,
+        100
+    );
 
-    const embed =
-        new EmbedBuilder()
-            .setColor(
-                saude.cor
-            )
-            .setTitle(
-                titulo
-            )
-            .setDescription(
-                [
-                    '**Monitoramento automático do servidor**',
-                    '',
-                    `**Situação:** ${saude.descricao}`,
-                    '',
-                    'As informações abaixo são consultadas ' +
-                    'nos serviços do bot e no Discord.'
-                ].join('\n')
-            )
-            .addFields(
-                {
-                    name: '🤖 SISTEMA',
-                    value: [
-                        `**Bot:** ${
-                            saude.conectado
-                                ? 'Online'
-                                : 'Offline'
-                        }`,
+    const mapa = new Map();
 
-                        `**SQLite:** ${
-                            saude.bancoDisponivel
-                                ? 'Disponível'
-                                : 'Indisponível'
-                        }`,
-
-                        `**Ping:** ${ping}`,
-
-                        `**Tempo online:** ${uptime}`
-                    ].join('\n'),
-
-                    inline: false
-                },
-
-                {
-                    name: '🛒 PEDIDOS E TICKETS',
-                    value:
-                        limitarTexto(
-                            criarTextoTickets(
-                                dados.tickets
-                            )
-                        ),
-
-                    inline: false
-                },
-
-                {
-                    name: '🎙️ EQUIPE EM VOZ',
-                    value:
-                        limitarTexto(
-                            criarTextoEquipe(
-                                dados.equipe
-                            )
-                        ),
-
-                    inline: false
-                },
-
-                {
-                    name: '🔗 CONVITES',
-                    value:
-                        limitarTexto(
-                            criarTextoConvites(
-                                dados.convites
-                            )
-                        ),
-
-                    inline: false
-                },
-
-                {
-                    name: '🛡️ MODERAÇÃO',
-                    value:
-                        limitarTexto(
-                            criarTextoModeracao(
-                                dados.moderacao
-                            )
-                        ),
-
-                    inline: false
-                }
-            )
-            .setFooter({
-                text:
-                    `InovareSale Bot ${VERSAO} • ` +
-                    'Atualização a cada 60 minutos'
-            })
-            .setTimestamp(
-                new Date(
-                    dados.atualizadoEm
-                )
-            );
-
-    // ======================================
-    // AVISOS OU PROBLEMAS
-    // ======================================
-
-    const observacoes = [
-        ...saude.problemas,
-        ...saude.avisos
-    ];
-
-    if (observacoes.length) {
-        embed.addFields({
-            name: '📋 OBSERVAÇÕES',
-
-            value:
-                limitarTexto(
-                    observacoes
-                        .slice(0, 6)
-                        .map(item =>
-                            `• ${item}`
-                        )
-                        .join('\n')
-                ),
-
-            inline: false
+    for (const item of voz) {
+        mapa.set(item.membroId, {
+            membroId: item.membroId,
+            warns: 0,
+            bans: 0,
+            tempoTotalSegundos:
+                item.tempoTotalSegundos,
+            tempoAtendimentoSegundos:
+                item.tempoAtendimentoSegundos
         });
     }
 
-    return embed;
+    for (const item of moderacao) {
+        const linha =
+            mapa.get(item.moderadorId) ||
+            {
+                membroId: item.moderadorId,
+                warns: 0,
+                bans: 0,
+                tempoTotalSegundos: 0,
+                tempoAtendimentoSegundos: 0
+            };
+
+        linha.warns = item.warns;
+        linha.bans = item.bans;
+
+        mapa.set(item.moderadorId, linha);
+    }
+
+    const pesos = pesosRanking(config);
+    const ranking = [];
+
+    for (const item of mapa.values()) {
+        const membro = await buscarMembroEquipe(
+            guild,
+            item.membroId,
+            cargoId
+        );
+
+        if (!membro) continue;
+
+        const pontos =
+            item.warns * pesos.warn +
+            item.bans * pesos.ban +
+            Math.floor(
+                item.tempoTotalSegundos / 600
+            ) * pesos.dezMinutosVoz +
+            Math.floor(
+                item.tempoAtendimentoSegundos / 600
+            ) * pesos.dezMinutosAtendimento;
+
+        ranking.push({
+            ...item,
+            nome:
+                membro.displayName ||
+                membro.user.username,
+            pontos,
+            totalAcoes:
+                item.warns +
+                item.bans
+        });
+    }
+
+    ranking.sort((a, b) =>
+        b.pontos - a.pontos ||
+        b.tempoAtendimentoSegundos -
+        a.tempoAtendimentoSegundos ||
+        a.membroId.localeCompare(b.membroId)
+    );
+
+    return {
+        disponivel: true,
+        periodo,
+        pesos,
+        ranking: ranking.map(
+            (item, indice) => ({
+                ...item,
+                posicao: indice + 1
+            })
+        )
+    };
 }
 
-// ==========================================
-// OBTER CANAL DO STATUS
-// ==========================================
+async function obterFuncionarioMensal(
+    guild,
+    membroId,
+    periodo = obterPeriodoMensal()
+) {
+    const id = idValido(membroId);
+
+    const cargoId = idValido(
+        getConfig().staff?.cargoId
+    );
+
+    if (!id || !cargoId) {
+        return {
+            disponivel: false,
+            motivo: 'Funcionário ou cargo inválido'
+        };
+    }
+
+    const membro = await buscarMembroEquipe(
+        guild,
+        id,
+        cargoId
+    );
+
+    if (!membro) {
+        return {
+            disponivel: false,
+            motivo:
+                'O usuário não pertence à equipe configurada'
+        };
+    }
+
+    if (!periodo.iniciado) {
+        return {
+            disponivel: false,
+            motivo: 'Ranking ainda não iniciado'
+        };
+    }
+
+    const fim = Math.min(
+        periodo.fim,
+        Math.floor(Date.now() / 1000)
+    );
+
+    const fimConsulta = Math.max(
+        periodo.inicio + 1,
+        fim
+    );
+
+    const voz = obterVozFuncionarioPeriodo(
+        guild.id,
+        id,
+        periodo.inicio,
+        fimConsulta
+    );
+
+    const moderacao = obterModeracaoFuncionarioPeriodo(
+        guild.id,
+        id,
+        periodo.inicio,
+        fimConsulta
+    );
+
+    const pesos = pesosRanking();
+
+    const pontos =
+        moderacao.warns * pesos.warn +
+        moderacao.bans * pesos.ban +
+        Math.floor(
+            voz.tempoTotalSegundos / 600
+        ) * pesos.dezMinutosVoz +
+        Math.floor(
+            voz.tempoAtendimentoSegundos / 600
+        ) * pesos.dezMinutosAtendimento;
+
+    return {
+        disponivel: true,
+        membroId: id,
+        nome:
+            membro.displayName ||
+            membro.user.username,
+        periodo,
+        pontos,
+        ...voz,
+        ...moderacao
+    };
+}
+
+function criarEmbedStatus(dados) {
+    if (!dados?.saude) {
+        throw new Error(
+            'Dados do status inválidos.'
+        );
+    }
+
+    return new EmbedBuilder()
+        .setColor(dados.saude.cor)
+        .setTitle(
+            `${dados.saude.icone} INOVARESALE | STATUS`
+        )
+        .setDescription(
+            `**Situação:** ${dados.saude.descricao}\n\n` +
+            `**Bot:** ${
+                dados.saude.conectado
+                    ? 'Online'
+                    : 'Offline'
+            }\n` +
+            `**SQLite:** ${
+                dados.saude.bancoDisponivel
+                    ? 'Disponível'
+                    : 'Indisponível'
+            }\n` +
+            `**Ping:** ${
+                dados.saude.ping === null
+                    ? 'Indisponível'
+                    : `${dados.saude.ping}ms`
+            }\n` +
+            `**Tempo online:** ${
+                formatarDuracao(
+                    dados.uptimeSegundos
+                )
+            }`
+        )
+        .setFooter({
+            text:
+                `InovareSale Bot ${VERSAO} • ` +
+                'Atualização a cada 30 minutos'
+        })
+        .setTimestamp(
+            new Date(dados.atualizadoEm)
+        );
+}
+
+function bloco(texto) {
+    return new TextDisplayBuilder()
+        .setContent(
+            limitarTexto(texto, 3800)
+        );
+}
+
+function criarContainer(
+    titulo,
+    conteudo,
+    cor = CORES.NORMAL
+) {
+    return new ContainerBuilder()
+        .setAccentColor(cor)
+        .addTextDisplayComponents(
+            bloco(titulo)
+        )
+        .addSeparatorComponents(
+            new SeparatorBuilder()
+        )
+        .addTextDisplayComponents(
+            bloco(conteudo)
+        );
+}
+
+function criarPainelStatus(dados) {
+    if (!dados?.saude) {
+        throw new Error(
+            'Dados do status inválidos.'
+        );
+    }
+
+    const periodo = obterPeriodoMensal();
+
+    const linhas = [
+        `${dados.saude.icone} **${dados.saude.descricao}**`,
+        '',
+        'Este painel permanece neste canal e é atualizado a cada **30 minutos**.',
+        'Escolha abaixo o que deseja consultar. A resposta será privada para você.',
+        '',
+        `🏆 **Ciclo da equipe:** ${periodo.rotulo}`,
+        `🕒 **Última atualização:** <t:${
+            Math.floor(
+                dados.atualizadoEm / 1000
+            )
+        }:R>`
+    ];
+
+    const menu = new StringSelectMenuBuilder()
+        .setCustomId('status_view')
+        .setPlaceholder(
+            'Selecione as informações de status'
+        )
+        .addOptions(
+            {
+                label: 'Status do Bot',
+                value: 'bot',
+                description:
+                    'Sistema, pedidos, convites e moderação',
+                emoji: '🤖'
+            },
+            {
+                label: 'Status da Equipe',
+                value: 'equipe',
+                description:
+                    'Atendimentos, voz e desempenho coletivo',
+                emoji: '🎙️'
+            },
+            {
+                label: 'Ranking Mensal',
+                value: 'ranking',
+                description:
+                    'Classificação dos funcionários',
+                emoji: '🏆'
+            },
+            {
+                label: 'Funcionário Individual',
+                value: 'individual',
+                description:
+                    'Consultar um membro da equipe',
+                emoji: '👤'
+            }
+        );
+
+    return criarContainer(
+        '## 💜 INOVARESALE | CENTRAL DE STATUS',
+        linhas.join('\n'),
+        dados.saude.cor
+    )
+        .addSeparatorComponents(
+            new SeparatorBuilder()
+        )
+        .addActionRowComponents(
+            new ActionRowBuilder()
+                .addComponents(menu)
+        )
+        .addTextDisplayComponents(
+            bloco(
+                `-# InovareSale Bot ${VERSAO} • Monitoramento automático`
+            )
+        );
+}
+
+function criarDetalhesBot(dados) {
+    const tickets = dados.tickets.disponivel
+        ? [
+            `**Ativos:** ${
+                formatarNumero(
+                    dados.tickets.ativos
+                )
+            }`,
+            `**Abertos:** ${
+                formatarNumero(
+                    dados.tickets.abertos
+                )
+            }`,
+            `**Em atendimento:** ${
+                formatarNumero(
+                    dados.tickets.emAtendimento
+                )
+            }`,
+            `**Finalizados:** ${
+                formatarNumero(
+                    dados.tickets.finalizados
+                )
+            }`,
+            `**Cancelados:** ${
+                formatarNumero(
+                    dados.tickets.cancelados
+                )
+            }`
+        ].join('\n')
+        : 'Estatísticas indisponíveis';
+
+    const convites = dados.convites.disponivel
+        ? [
+            `**Confirmados:** ${
+                formatarNumero(
+                    dados.convites.confirmados
+                )
+            }`,
+            `**Links ativos:** ${
+                formatarNumero(
+                    dados.convites.linksAtivos
+                )
+            }`,
+            `**Não identificados:** ${
+                formatarNumero(
+                    dados.convites.naoIdentificados
+                )
+            }`
+        ].join('\n')
+        : 'Dados indisponíveis';
+
+    const mod = dados.moderacao.disponivel
+        ? [
+            `**/warn registrados:** ${
+                formatarNumero(
+                    dados.moderacao.warns
+                )
+            }`,
+            `**/ban registrados:** ${
+                formatarNumero(
+                    dados.moderacao.bans
+                )
+            }`,
+            `**Timeouts registrados:** ${
+                formatarNumero(
+                    dados.moderacao.timeouts
+                )
+            }`
+        ].join('\n')
+        : 'Dados indisponíveis';
+
+    const observacoes = [
+        ...dados.saude.problemas,
+        ...dados.saude.avisos
+    ];
+
+    return criarContainer(
+        '## 🤖 STATUS DO BOT',
+        [
+            `**Situação:** ${
+                dados.saude.icone
+            } ${dados.saude.descricao}`,
+            `**Bot:** ${
+                dados.saude.conectado
+                    ? 'Online'
+                    : 'Offline'
+            }`,
+            `**SQLite:** ${
+                dados.saude.bancoDisponivel
+                    ? 'Disponível'
+                    : 'Indisponível'
+            }`,
+            `**Ping:** ${
+                dados.saude.ping === null
+                    ? 'Indisponível'
+                    : `${dados.saude.ping} ms`
+            }`,
+            `**Tempo online:** ${
+                formatarDuracao(
+                    dados.uptimeSegundos
+                )
+            }`,
+            '',
+            '### 🛒 Pedidos e tickets',
+            tickets,
+            '',
+            '### 🔗 Convites',
+            convites,
+            '',
+            '### 🛡️ Moderação do InovareSale',
+            mod,
+            observacoes.length
+                ? `\n### ⚠️ Observações\n${
+                    observacoes
+                        .slice(0, 5)
+                        .map(item => `• ${item}`)
+                        .join('\n')
+                }`
+                : '',
+            '',
+            `-# Atualizado <t:${
+                Math.floor(
+                    dados.atualizadoEm / 1000
+                )
+            }:R>`
+        ].filter(Boolean).join('\n'),
+        dados.saude.cor
+    );
+}
+
+function textoRanking(
+    ranking,
+    limite = 10
+) {
+    if (!ranking.length) {
+        return 'Nenhuma atividade registrada neste período.';
+    }
+
+    return ranking
+        .slice(0, limite)
+        .map(item => {
+            const medalha =
+                ['🥇', '🥈', '🥉'][
+                    item.posicao - 1
+                ] ||
+                `**${item.posicao}.**`;
+
+            return (
+                `${medalha} <@${item.membroId}> — ` +
+                `**${formatarNumero(item.pontos)} pts**\n` +
+                `↳ ${item.warns} warns • ` +
+                `${item.bans} bans • ` +
+                `${formatarDuracao(
+                    item.tempoAtendimentoSegundos
+                )} atendimento`
+            );
+        })
+        .join('\n\n');
+}
+
+function criarDetalhesEquipe(
+    dados,
+    ranking
+) {
+    const total = ranking.ranking.reduce(
+        (soma, item) => ({
+            pontos:
+                soma.pontos +
+                item.pontos,
+            warns:
+                soma.warns +
+                item.warns,
+            bans:
+                soma.bans +
+                item.bans,
+            voz:
+                soma.voz +
+                item.tempoTotalSegundos,
+            atendimento:
+                soma.atendimento +
+                item.tempoAtendimentoSegundos
+        }),
+        {
+            pontos: 0,
+            warns: 0,
+            bans: 0,
+            voz: 0,
+            atendimento: 0
+        }
+    );
+
+    const presenca =
+        dados.equipe.disponivel ||
+        dados.equipe.parcial
+            ? formatarNumero(
+                dados.equipe.quantidade
+            )
+            : 'Indisponível';
+
+    return criarContainer(
+        '## 🎙️ STATUS DA EQUIPE',
+        [
+            `**Período:** ${
+                ranking.periodo.rotulo
+            }`,
+            `**Funcionários com atividades:** ${
+                ranking.ranking.length
+            }`,
+            `**Funcionários em call agora:** ${
+                presenca
+            }`,
+            `**Total de pontos:** ${
+                formatarNumero(total.pontos)
+            }`,
+            `**Advertências:** ${
+                formatarNumero(total.warns)
+            }`,
+            `**Banimentos:** ${
+                formatarNumero(total.bans)
+            }`,
+            `**Tempo total em voz:** ${
+                formatarDuracao(total.voz)
+            }`,
+            `**Tempo em call de atendimento:** ${
+                formatarDuracao(
+                    total.atendimento
+                )
+            }`,
+            '**Mensagens:** integração pendente',
+            '',
+            '### 🏅 Destaques do mês',
+            textoRanking(ranking.ranking, 3),
+            '',
+            '-# Apenas ações registradas pelo InovareSale entram nas estatísticas de moderação.'
+        ].join('\n'),
+        0x5865F2
+    );
+}
+
+function criarDetalhesRanking(resultado) {
+    const {
+        pesos,
+        periodo,
+        ranking
+    } = resultado;
+
+    return criarContainer(
+        '## 🏆 RANKING MENSAL',
+        [
+            `**Ciclo:** ${periodo.rotulo}`,
+            '',
+            textoRanking(ranking, 15),
+            '',
+            '### ⚖️ Pontuação',
+            `**Warn:** ${pesos.warn} pts • ` +
+                `**Ban:** ${pesos.ban} pts`,
+            `**10 min em call:** ${
+                pesos.dezMinutosVoz
+            } pt(s)`,
+            `**10 min em atendimento:** +${
+                pesos.dezMinutosAtendimento
+            } pt(s)`,
+            '**Mensagens:** ainda não integradas',
+            '',
+            '-# Os pontos deste ciclo recomeçam no próximo dia 14. O histórico é preservado.'
+        ].join('\n'),
+        0xF1C40F
+    );
+}
+
+function criarDetalhesFuncionario(dados) {
+    return criarContainer(
+        `## 👤 ${
+            limitarTexto(dados.nome, 70)
+        }`,
+        [
+            `<@${dados.membroId}>`,
+            `**Ciclo:** ${
+                dados.periodo.rotulo
+            }`,
+            `**Pontuação:** ${
+                formatarNumero(dados.pontos)
+            } pts`,
+            `**Advertências:** ${
+                formatarNumero(dados.warns)
+            }`,
+            `**Banimentos:** ${
+                formatarNumero(dados.bans)
+            }`,
+            `**Total de ações:** ${
+                formatarNumero(
+                    dados.totalAcoes
+                )
+            }`,
+            `**Tempo total em voz:** ${
+                formatarDuracao(
+                    dados.tempoTotalSegundos
+                )
+            }`,
+            `**Tempo em call de atendimento:** ${
+                formatarDuracao(
+                    dados.tempoAtendimentoSegundos
+                )
+            }`,
+            `**Sessões de voz:** ${
+                formatarNumero(
+                    dados.totalSessoes
+                )
+            }`,
+            '**Mensagens válidas:** integração pendente'
+        ].join('\n'),
+        0x5865F2
+    );
+}
+
+async function responderStatus(
+    interaction,
+    container
+) {
+    const payload = {
+        components: [container],
+        allowedMentions: {
+            parse: []
+        },
+        flags:
+            MessageFlags.Ephemeral |
+            MessageFlags.IsComponentsV2
+    };
+
+    if (
+        interaction.replied ||
+        interaction.deferred
+    ) {
+        return interaction.editReply({
+            components: [container],
+            allowedMentions: {
+                parse: []
+            }
+        });
+    }
+
+    return interaction.reply(payload);
+}
+
+async function handleStatusInteraction(
+    interaction
+) {
+    if (
+        !interaction.inGuild?.() ||
+        !interaction.guild
+    ) {
+        await responderStatus(
+            interaction,
+            criarContainer(
+                '## ⚠️ Indisponível',
+                'Este menu funciona apenas em servidores.',
+                CORES.ATENCAO
+            )
+        );
+
+        return true;
+    }
+
+    const id = interaction.customId;
+
+    if (
+        id !== 'status_view' &&
+        id !== 'status_funcionario'
+    ) {
+        return false;
+    }
+
+    if (id === 'status_view') {
+        const config = getConfig();
+
+        const painelId = idValido(
+            config.status?.mensagemId
+        );
+
+        if (
+            painelId &&
+            interaction.message?.id !== painelId
+        ) {
+            await responderStatus(
+                interaction,
+                criarContainer(
+                    '## ⚠️ Painel antigo',
+                    'Utilize o painel de status atual.',
+                    CORES.ATENCAO
+                )
+            );
+
+            return true;
+        }
+    }
+
+    await responderStatus(
+        interaction,
+        criarContainer(
+            '## ⏳ Consultando',
+            'Buscando as informações atualizadas...'
+        )
+    );
+
+    try {
+        let conteudo;
+
+        if (id === 'status_funcionario') {
+            const membroId = idValido(
+                interaction.values?.[0]
+            );
+
+            const dados =
+                await obterFuncionarioMensal(
+                    interaction.guild,
+                    membroId
+                );
+
+            conteudo = dados.disponivel
+                ? criarDetalhesFuncionario(dados)
+                : criarContainer(
+                    '## ⚠️ Não foi possível consultar',
+                    dados.motivo,
+                    CORES.ATENCAO
+                );
+        } else {
+            const opcao =
+                interaction.values?.[0];
+
+            if (opcao === 'individual') {
+                conteudo = criarContainer(
+                    '## 👤 CONSULTAR FUNCIONÁRIO',
+                    'Escolha abaixo o funcionário que deseja consultar.'
+                ).addActionRowComponents(
+                    new ActionRowBuilder()
+                        .addComponents(
+                            new UserSelectMenuBuilder()
+                                .setCustomId(
+                                    'status_funcionario'
+                                )
+                                .setPlaceholder(
+                                    'Selecione um funcionário'
+                                )
+                                .setMinValues(1)
+                                .setMaxValues(1)
+                        )
+                );
+            } else if (opcao === 'bot') {
+                conteudo = criarDetalhesBot(
+                    await obterDadosStatus(
+                        interaction.guild
+                    )
+                );
+            } else if (
+                opcao === 'equipe' ||
+                opcao === 'ranking'
+            ) {
+                const ranking =
+                    await obterRankingMensal(
+                        interaction.guild
+                    );
+
+                if (!ranking.disponivel) {
+                    conteudo = criarContainer(
+                        '## ⚠️ Ranking indisponível',
+                        ranking.motivo,
+                        CORES.ATENCAO
+                    );
+                } else if (
+                    opcao === 'ranking'
+                ) {
+                    conteudo =
+                        criarDetalhesRanking(
+                            ranking
+                        );
+                } else {
+                    conteudo =
+                        criarDetalhesEquipe(
+                            await obterDadosStatus(
+                                interaction.guild
+                            ),
+                            ranking
+                        );
+                }
+            } else {
+                conteudo = criarContainer(
+                    '## ⚠️ Opção desconhecida',
+                    'Selecione uma opção válida.',
+                    CORES.ATENCAO
+                );
+            }
+        }
+
+        await interaction.editReply({
+            components: [conteudo],
+            allowedMentions: {
+                parse: []
+            }
+        });
+    } catch (erro) {
+        console.error(
+            '[InovareSale | Status] Falha no seletor:',
+            erro
+        );
+
+        await interaction.editReply({
+            components: [
+                criarContainer(
+                    '## ❌ Consulta indisponível',
+                    'Não foi possível obter os dados agora. Tente novamente.',
+                    CORES.PROBLEMA
+                )
+            ]
+        });
+    }
+
+    return true;
+}
 
 async function obterCanalStatus(
     guild,
     config = null
 ) {
-    if (!guild?.id) {
-        return null;
-    }
-
-    const configuracao =
-        config || getConfig();
+    if (!guild?.id) return null;
 
     const canalId = idValido(
-        configuracao.status?.canalId
+        (config || getConfig()).status?.canalId
     );
 
-    if (!canalId) {
-        return null;
-    }
+    if (!canalId) return null;
 
     let canal =
-        guild.channels.cache.get(
-            canalId
-        );
+        guild.channels.cache.get(canalId);
 
     if (!canal) {
         try {
-            canal =
-                await guild.channels.fetch(
-                    canalId
-                );
-
+            canal = await guild.channels.fetch(
+                canalId
+            );
         } catch (erro) {
             console.warn(
-                '[InovareSale | Status] ' +
-                'Não foi possível consultar o canal:',
+                '[InovareSale | Status] Canal indisponível:',
                 erro.message
             );
 
@@ -1334,78 +1520,34 @@ async function obterCanalStatus(
         }
     }
 
-    if (
-        !canal ||
-        !canal.isTextBased?.() ||
-        typeof canal.send !== 'function'
-    ) {
-        return null;
-    }
-
-    return canal;
+    return (
+        canal?.isTextBased?.() &&
+        typeof canal.send === 'function'
+    )
+        ? canal
+        : null;
 }
-
-// ==========================================
-// BUSCAR MENSAGEM EXISTENTE
-// ==========================================
-
-// Só cria outra mensagem quando o
-// Discord confirma que a anterior
-// não existe mais.
-//
-// Se houver erro de permissão ou
-// de conexão, não tentamos criar
-// outra mensagem, evitando spam.
 
 async function buscarMensagemStatus(
     canal,
     mensagemId
 ) {
-    const id =
-        idValido(mensagemId);
+    const id = idValido(mensagemId);
 
-    if (!id) {
-        return null;
-    }
+    if (!id) return null;
 
     try {
         return await canal.messages.fetch(
             id
         );
-
     } catch (erro) {
-        // 10008 = Unknown Message.
-        //
-        // A mensagem realmente
-        // não existe mais.
-
-        if (
-            erro.code === 10008
-        ) {
+        if (erro.code === 10008) {
             return null;
         }
-
-        // Outros erros podem ser
-        // problemas temporários.
-        //
-        // Não publicamos outra
-        // mensagem nesses casos.
 
         throw erro;
     }
 }
-
-// ==========================================
-// ATUALIZAR CONFIGURAÇÃO DA MENSAGEM
-// ==========================================
-
-// Recarrega a configuração imediatamente
-// antes de salvar para não sobrescrever
-// alterações feitas em outros menus.
-//
-// Não altera config.calculadora,
-// config.tickets, config.vendas,
-// config.estoque nem o histórico.
 
 function salvarReferenciaStatus(
     guildId,
@@ -1416,15 +1558,9 @@ function salvarReferenciaStatus(
 
     config.status ??= {};
 
-    config.status.canalId =
-        canalId;
-
-    config.status.mensagemId =
-        mensagemId;
-
-    config.status.mensagemCanalId =
-        canalId;
-
+    config.status.canalId = canalId;
+    config.status.mensagemId = mensagemId;
+    config.status.mensagemCanalId = canalId;
     config.status.ultimaAtualizacaoEm =
         new Date().toISOString();
 
@@ -1437,9 +1573,147 @@ function salvarReferenciaStatus(
     };
 }
 
-// ==========================================
-// ATUALIZAR PAINEL DE UM SERVIDOR
-// ==========================================
+async function anunciarFuncionarioDoMes(
+    guild,
+    canal
+) {
+    const periodoAtual =
+        obterPeriodoMensal();
+
+    if (
+        !periodoAtual.iniciado ||
+        periodoAtual.inicio <= INICIO_RANKING
+    ) {
+        return false;
+    }
+
+    if (
+        PREMIACOES_PROCESSANDO.has(
+            guild.id
+        )
+    ) {
+        return false;
+    }
+
+    PREMIACOES_PROCESSANDO.add(
+        guild.id
+    );
+
+    try {
+        const fim =
+            periodoAtual.inicio;
+
+        const inicioBase = new Date(
+            (fim - 3600) * 1000
+        );
+
+        const periodo =
+            obterPeriodoMensal(
+                inicioBase
+            );
+
+        if (
+            periodo.inicio < INICIO_RANKING
+        ) {
+            return false;
+        }
+
+        const existente =
+            SQL_PREMIOS.obter.get(
+                guild.id,
+                periodo.inicio
+            );
+
+        if (existente?.anunciado_em) {
+            return false;
+        }
+
+        const resultado =
+            await obterRankingMensal(
+                guild,
+                periodo
+            );
+
+        if (!resultado.disponivel) {
+            return false;
+        }
+
+        const vencedor =
+            resultado.ranking.find(
+                item => item.pontos > 0
+            ) || null;
+
+        SQL_PREMIOS.inserir.run(
+            guild.id,
+            periodo.inicio,
+            periodo.fim,
+            vencedor?.membroId || null,
+            vencedor?.pontos || 0
+        );
+
+        const anuncio = vencedor
+            ? [
+                '## 🏆 FUNCIONÁRIO DO MÊS',
+                `Parabéns, <@${vencedor.membroId}>!`,
+                `**Pontuação:** ${
+                    formatarNumero(
+                        vencedor.pontos
+                    )
+                } pts`,
+                `**Período:** ${
+                    periodo.rotulo
+                }`,
+                '',
+                '💜 Obrigado pelo seu trabalho na InovareSale!'
+            ].join('\n')
+            : [
+                '## 🏆 ENCERRAMENTO DO CICLO',
+                `**Período:** ${
+                    periodo.rotulo
+                }`,
+                'Nenhum funcionário alcançou pontuação neste ciclo.'
+            ].join('\n');
+
+        await canal.send({
+            components: [
+                criarContainer(
+                    '## 💜 INOVARESALE | EQUIPE',
+                    anuncio,
+                    0xF1C40F
+                )
+            ],
+            flags:
+                MessageFlags.IsComponentsV2,
+            allowedMentions: {
+                parse: [],
+                users: vencedor
+                    ? [vencedor.membroId]
+                    : []
+            }
+        });
+
+        SQL_PREMIOS.marcar.run(
+            Math.floor(
+                Date.now() / 1000
+            ),
+            guild.id,
+            periodo.inicio
+        );
+
+        return true;
+    } catch (erro) {
+        console.error(
+            '[InovareSale | Status] Falha no anúncio mensal:',
+            erro
+        );
+
+        return false;
+    } finally {
+        PREMIACOES_PROCESSANDO.delete(
+            guild.id
+        );
+    }
+}
 
 async function atualizarStatusServidor(
     guild,
@@ -1452,10 +1726,6 @@ async function atualizarStatusServidor(
         };
     }
 
-    // ======================================
-    // IMPEDIR ATUALIZAÇÕES SIMULTÂNEAS
-    // ======================================
-
     if (
         SERVIDORES_ATUALIZANDO.has(
             guild.id
@@ -1464,8 +1734,7 @@ async function atualizarStatusServidor(
         return {
             atualizado: false,
             ocupado: true,
-            motivo:
-                'Atualização já em andamento'
+            motivo: 'Atualização em andamento'
         };
     }
 
@@ -1474,33 +1743,21 @@ async function atualizarStatusServidor(
     );
 
     try {
-        // ==================================
-        // CARREGAR CONFIGURAÇÃO
-        // ==================================
-
-        const config =
-            getConfig();
-
+        const config = getConfig();
         const statusConfig =
             config.status || {};
 
-        const canalId =
-            idValido(
+        if (
+            !idValido(
                 statusConfig.canalId
-            );
-
-        if (!canalId) {
+            )
+        ) {
             return {
                 atualizado: false,
                 configurado: false,
-                motivo:
-                    'Canal de status não configurado'
+                motivo: 'Canal não configurado'
             };
         }
-
-        // ==================================
-        // BUSCAR CANAL
-        // ==================================
 
         const canal =
             await obterCanalStatus(
@@ -1512,14 +1769,9 @@ async function atualizarStatusServidor(
             return {
                 atualizado: false,
                 configurado: true,
-                motivo:
-                    'Canal de status indisponível'
+                motivo: 'Canal indisponível'
             };
         }
-
-        // ==================================
-        // COLETAR DADOS REAIS
-        // ==================================
 
         const dados =
             await obterDadosStatus(
@@ -1527,164 +1779,111 @@ async function atualizarStatusServidor(
                 client
             );
 
-        const embed =
-            criarEmbedStatus(
-                dados
-            );
-
         const payload = {
-            embeds: [embed],
-
+            components: [
+                criarPainelStatus(
+                    dados
+                )
+            ],
+            content: null,
+            embeds: [],
+            flags:
+                MessageFlags.IsComponentsV2,
             allowedMentions: {
                 parse: []
             }
         };
 
-        // ==================================
-        // LOCALIZAR MENSAGEM ANTERIOR
-        // ==================================
+        const mensagemId = idValido(
+            statusConfig.mensagemId
+        );
 
-        const mensagemId =
-            idValido(
-                statusConfig.mensagemId
-            );
-
-        const canalAnteriorId =
-            idValido(
-                statusConfig.mensagemCanalId
-            );
+        const canalAnteriorId = idValido(
+            statusConfig.mensagemCanalId
+        );
 
         const mesmaLocalizacao =
             !canalAnteriorId ||
             canalAnteriorId === canal.id;
 
-        let mensagem = null;
-
-        if (
+        const mensagem =
             mensagemId &&
             mesmaLocalizacao
-        ) {
-            mensagem =
-                await buscarMensagemStatus(
+                ? await buscarMensagemStatus(
                     canal,
                     mensagemId
-                );
-        }
+                )
+                : null;
 
-        // ==================================
-        // EDITAR A MENSAGEM EXISTENTE
-        // ==================================
+        let publicada;
+        let criado = false;
 
         if (mensagem) {
-            await mensagem.edit(
-                payload
-            );
+            if (
+                mensagem.author?.id !==
+                client?.user?.id
+            ) {
+                throw new Error(
+                    'A mensagem salva não pertence a este bot.'
+                );
+            }
 
-            RESULTADOS.set(
+            publicada =
+                await mensagem.edit(
+                    payload
+                );
+        } else {
+            publicada =
+                await canal.send(
+                    payload
+                );
+
+            criado = true;
+
+            salvarReferenciaStatus(
                 guild.id,
-                {
-                    atualizadoEm:
-                        Date.now(),
-
-                    mensagemId:
-                        mensagem.id,
-
-                    canalId:
-                        canal.id,
-
-                    estado:
-                        dados.saude.estado,
-
-                    criado: false
-                }
+                canal.id,
+                publicada.id
             );
 
-            return {
-                atualizado: true,
-                criado: false,
-                sucesso: true,
+            if (
+                mensagemId &&
+                canalAnteriorId &&
+                canalAnteriorId !== canal.id
+            ) {
+                try {
+                    const anterior =
+                        await guild.channels.fetch(
+                            canalAnteriorId
+                        );
 
-                mensagemId:
-                    mensagem.id,
-
-                canalId:
-                    canal.id,
-
-                estado:
-                    dados.saude.estado
-            };
-        }
-
-        // ==================================
-        // CRIAR PRIMEIRA MENSAGEM
-        // ==================================
-
-        // Só chegamos aqui se:
-        //
-        // - Ainda não havia ID salvo;
-        // - O canal configurado mudou;
-        // - Ou o Discord confirmou que
-        //   a mensagem anterior foi apagada.
-
-        const novaMensagem =
-            await canal.send(
-                payload
-            );
-
-        // ==================================
-        // SALVAR ID NO SQLITE
-        // ==================================
-
-        salvarReferenciaStatus(
-            guild.id,
-            canal.id,
-            novaMensagem.id
-        );
-
-        // ==================================
-        // REMOVER PAINEL DO CANAL ANTIGO
-        // ==================================
-
-        // Se o administrador trocou o
-        // canal de status, tentamos
-        // remover a mensagem antiga.
-        //
-        // Uma falha nessa limpeza
-        // não apaga a nova referência.
-
-        if (
-            mensagemId &&
-            canalAnteriorId &&
-            canalAnteriorId !== canal.id
-        ) {
-            try {
-                const canalAnterior =
-                    await guild.channels.fetch(
-                        canalAnteriorId
-                    );
-
-                if (
-                    canalAnterior?.messages?.fetch
-                ) {
                     const mensagemAnterior =
                         await buscarMensagemStatus(
-                            canalAnterior,
+                            anterior,
                             mensagemId
                         );
 
                     if (
-                        mensagemAnterior &&
-                        mensagemAnterior.author?.id ===
-                        client.user?.id
+                        mensagemAnterior?.author?.id ===
+                        client?.user?.id
                     ) {
                         await mensagemAnterior.delete();
                     }
+                } catch (erro) {
+                    console.warn(
+                        '[InovareSale | Status] Falha ao limpar painel antigo:',
+                        erro.message
+                    );
                 }
+            }
+        }
 
+        if (!publicada.pinned) {
+            try {
+                await publicada.pin();
             } catch (erro) {
                 console.warn(
-                    '[InovareSale | Status] ' +
-                    'Não foi possível remover o painel antigo:',
+                    '[InovareSale | Status] Não foi possível fixar o painel:',
                     erro.message
                 );
             }
@@ -1693,51 +1892,38 @@ async function atualizarStatusServidor(
         RESULTADOS.set(
             guild.id,
             {
-                atualizadoEm:
-                    Date.now(),
-
-                mensagemId:
-                    novaMensagem.id,
-
-                canalId:
-                    canal.id,
-
-                estado:
-                    dados.saude.estado,
-
-                criado: true
+                atualizadoEm: Date.now(),
+                mensagemId: publicada.id,
+                canalId: canal.id,
+                estado: dados.saude.estado,
+                criado
             }
+        );
+
+        await anunciarFuncionarioDoMes(
+            guild,
+            canal
         );
 
         return {
             atualizado: true,
-            criado: true,
             sucesso: true,
-
-            mensagemId:
-                novaMensagem.id,
-
-            canalId:
-                canal.id,
-
-            estado:
-                dados.saude.estado
+            criado,
+            mensagemId: publicada.id,
+            canalId: canal.id,
+            estado: dados.saude.estado
         };
-
     } catch (erro) {
         console.error(
-            '[InovareSale | Status] ' +
-            `Falha no servidor ${guild.id}:`,
+            `[InovareSale | Status] Falha no servidor ${guild.id}:`,
             erro
         );
 
         return {
             atualizado: false,
             sucesso: false,
-            motivo:
-                erro.message
+            motivo: erro.message
         };
-
     } finally {
         SERVIDORES_ATUALIZANDO.delete(
             guild.id
@@ -1745,20 +1931,13 @@ async function atualizarStatusServidor(
     }
 }
 
-// ==========================================
-// ATUALIZAR TODOS OS SERVIDORES
-// ==========================================
-
 async function atualizarTodosStatus(
     client
 ) {
-    if (
-        !client?.isReady?.()
-    ) {
+    if (!client?.isReady?.()) {
         return {
             atualizado: false,
-            motivo:
-                'Bot não conectado'
+            motivo: 'Bot desconectado'
         };
     }
 
@@ -1795,49 +1974,27 @@ async function atualizarTodosStatus(
                     client
                 );
 
-            if (
-                resultado.atualizado
-            ) {
+            if (resultado.atualizado) {
                 if (resultado.criado) {
                     resumo.mensagensCriadas++;
-
                 } else {
                     resumo.mensagensAtualizadas++;
                 }
-
             } else if (
                 resultado.configurado === false ||
                 resultado.ocupado
             ) {
                 resumo.ignorados++;
-
             } else {
                 resumo.falhas++;
             }
         }
 
         return resumo;
-
     } finally {
         atualizacaoGeralEmAndamento = false;
     }
 }
-
-// ==========================================
-// INICIAR MONITORAMENTO AUTOMÁTICO
-// ==========================================
-
-// Chamado pelo index.js depois que
-// o cliente Discord estiver pronto.
-//
-// Mantém apenas um intervalo ativo.
-//
-// Atualiza os painéis uma vez
-// imediatamente e, depois,
-// a cada 60 minutos.
-//
-// Não envia uma nova mensagem
-// em toda atualização.
 
 function iniciarMonitoramentoStatus(
     client
@@ -1855,26 +2012,16 @@ function iniciarMonitoramentoStatus(
         return false;
     }
 
-    clienteMonitorado =
-        client;
-
-    // ======================================
-    // PRIMEIRA ATUALIZAÇÃO
-    // ======================================
+    clienteMonitorado = client;
 
     atualizarTodosStatus(
         client
     ).catch(erro => {
         console.error(
-            '[InovareSale | Status] ' +
-            'Falha na atualização inicial:',
+            '[InovareSale | Status] Falha inicial:',
             erro
         );
     });
-
-    // ======================================
-    // ATUALIZAÇÃO POR HORA
-    // ======================================
 
     timerStatus = setInterval(
         () => {
@@ -1882,8 +2029,7 @@ function iniciarMonitoramentoStatus(
                 client
             ).catch(erro => {
                 console.error(
-                    '[InovareSale | Status] ' +
-                    'Falha na atualização automática:',
+                    '[InovareSale | Status] Falha periódica:',
                     erro
                 );
             });
@@ -1894,137 +2040,94 @@ function iniciarMonitoramentoStatus(
     timerStatus.unref?.();
 
     console.log(
-        '[InovareSale | Status] ' +
-        'Monitoramento iniciado: ' +
-        '60 minutos.'
+        '[InovareSale | Status] Monitoramento iniciado: 30 minutos.'
     );
 
     return true;
 }
-
-// ==========================================
-// PARAR MONITORAMENTO
-// ==========================================
 
 function pararMonitoramentoStatus() {
     if (!timerStatus) {
         clienteMonitorado = null;
-
         return false;
     }
 
-    clearInterval(
-        timerStatus
-    );
+    clearInterval(timerStatus);
 
     timerStatus = null;
-
     clienteMonitorado = null;
-
-    console.log(
-        '[InovareSale | Status] ' +
-        'Monitoramento interrompido.'
-    );
 
     return true;
 }
-
-// ==========================================
-// ESTATÍSTICAS DO MONITORAMENTO
-// ==========================================
 
 function obterEstatisticasStatus(
     servidorId = null
 ) {
     if (servidorId) {
-        const registro =
-            RESULTADOS.get(
-                String(servidorId)
-            );
+        const registro = RESULTADOS.get(
+            String(servidorId)
+        );
 
         return {
             monitoramentoAtivo:
                 Boolean(timerStatus),
-
             intervaloMinutos:
                 INTERVALO_ATUALIZACAO / 60000,
-
             ultimaAtualizacao:
-                registro?.atualizadoEm ||
-                null,
-
+                registro?.atualizadoEm || null,
             mensagemId:
-                registro?.mensagemId ||
-                null,
-
+                registro?.mensagemId || null,
             canalId:
-                registro?.canalId ||
-                null,
-
+                registro?.canalId || null,
             estado:
-                registro?.estado ||
-                null
+                registro?.estado || null
         };
     }
 
     return {
-        versao:
-            VERSAO,
-
+        versao: VERSAO,
         monitoramentoAtivo:
             Boolean(timerStatus),
-
         clienteConectado:
             Boolean(
                 clienteMonitorado?.isReady?.()
             ),
-
         intervaloMinutos:
             INTERVALO_ATUALIZACAO / 60000,
-
         servidoresMonitorados:
             RESULTADOS.size,
-
         atualizacaoEmAndamento:
             atualizacaoGeralEmAndamento,
-
         resultados:
             Array.from(
                 RESULTADOS.entries()
             ).map(
                 ([id, dados]) => ({
                     servidorId: id,
-
                     ...dados
                 })
             )
     };
 }
 
-// ==========================================
-// EXPORTAÇÕES
-// ==========================================
-
 module.exports = {
     VERSAO,
     INTERVALO_ATUALIZACAO,
-
     formatarDuracao,
-
     obterResumoTicketsStatus,
     obterEquipeEmVoz,
     obterSaudeSistema,
     obterDadosStatus,
-
     criarEmbedStatus,
-
+    criarPainelStatus,
+    obterPeriodoMensal,
+    obterRankingMensal,
+    obterFuncionarioMensal,
+    handleStatusInteraction,
     obterCanalStatus,
-
     atualizarStatusServidor,
     atualizarTodosStatus,
-
     iniciarMonitoramentoStatus,
     pararMonitoramentoStatus,
-
     obterEstatisticasStatus
 };

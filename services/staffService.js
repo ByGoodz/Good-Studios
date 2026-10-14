@@ -1,484 +1,270 @@
 
 'use strict';
 
-const {
-    GatewayIntentBits
-} = require('discord.js');
-
-const {
-    db
-} = require('../database/db');
-
-const {
-    getConfig
-} = require('../utils/storage');
-
-// ==========================================
-// INOVARESALE BOT 3.0
-// SERVIÇO DE EQUIPE EM VOZ
-// ==========================================
-
-// FUNCIONALIDADES:
-//
-// - Identificar funcionários pelo cargo
-// - Registrar entradas em call
-// - Registrar saídas de call
-// - Registrar mudanças de canal
-// - Armazenar sessões no SQLite
-// - Calcular tempo observado em voz
-// - Criar ranking da equipe
-// - Consultar histórico individual
-// - Reconciliar sessões após reinícios
-// - Evitar contar períodos offline
-// - Proteger contra eventos simultâneos
-//
-// IMPORTANTE:
-//
-// Este serviço não apaga históricos.
-//
-// Ele utiliza a tabela:
-// staff_voz_sessoes_v3
-//
-// Ao reiniciar o bot:
-//
-// 1. Fecha as sessões antigas no último
-//    horário observado antes do reinício.
-//
-// 2. Abre novas sessões para os membros
-//    que continuam em canais de voz.
-//
-// Assim, o tempo em que o bot ficou
-// desligado não entra na contagem.
-//
-// A sincronização periódica de 5 minutos
-// permanece configurada no index.js.
-
-// ==========================================
-// CONSTANTES
-// ==========================================
+const { GatewayIntentBits } = require('discord.js');
+const { db } = require('../database/db');
+const { getConfig } = require('../utils/storage');
 
 const LIMITE_RANKING = 25;
-
 const LIMITE_HISTORICO = 50;
-
 const LIMITE_CONSULTAS = 100;
-
-// Servidores já reconciliados neste
-// processo do bot.
-
-const SERVIDORES_SINCRONIZADOS =
-    new Set();
-
-// Fila por servidor.
-//
-// Impede que uma sincronização e um
-// evento de voz alterem as mesmas
-// sessões ao mesmo tempo.
-
-const FILAS_SERVIDORES =
-    new Map();
-
-// ==========================================
-// CRIAR TABELA SQLITE
-// ==========================================
-
-// O nome e as colunas são os mesmos
-// da versão anterior do staffService.
-//
-// CREATE TABLE IF NOT EXISTS não
-// substitui registros existentes.
+const SERVIDORES_SINCRONIZADOS = new Set();
+const FILAS_SERVIDORES = new Map();
 
 db.exec(`
-    CREATE TABLE IF NOT EXISTS
-        staff_voz_sessoes_v3 (
-
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            servidor_id TEXT NOT NULL,
-
-            membro_id TEXT NOT NULL,
-
-            canal_inicial_id TEXT NOT NULL,
-
-            canal_atual_id TEXT NOT NULL,
-
-            iniciada_em INTEGER NOT NULL,
-
-            ultima_observacao_em INTEGER NOT NULL,
-
-            encerrada_em INTEGER,
-
-            motivo_encerramento TEXT,
-
-            CHECK (
-                encerrada_em IS NULL
-                OR encerrada_em >= iniciada_em
-            )
-        );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS
-        idx_staff_voz_sessao_aberta_v3
-    ON staff_voz_sessoes_v3 (
-        servidor_id,
-        membro_id
-    )
-    WHERE encerrada_em IS NULL;
-
-    CREATE INDEX IF NOT EXISTS
-        idx_staff_voz_historico_v3
-    ON staff_voz_sessoes_v3 (
-        servidor_id,
-        membro_id,
-        id
+    CREATE TABLE IF NOT EXISTS staff_voz_sessoes_v3 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        servidor_id TEXT NOT NULL,
+        membro_id TEXT NOT NULL,
+        canal_inicial_id TEXT NOT NULL,
+        canal_atual_id TEXT NOT NULL,
+        iniciada_em INTEGER NOT NULL,
+        ultima_observacao_em INTEGER NOT NULL,
+        encerrada_em INTEGER,
+        motivo_encerramento TEXT,
+        CHECK (encerrada_em IS NULL OR encerrada_em >= iniciada_em)
     );
-
-    CREATE INDEX IF NOT EXISTS
-        idx_staff_voz_ranking_v3
-    ON staff_voz_sessoes_v3 (
-        servidor_id,
-        membro_id
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_voz_sessao_aberta_v3
+        ON staff_voz_sessoes_v3 (servidor_id, membro_id)
+        WHERE encerrada_em IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_staff_voz_historico_v3
+        ON staff_voz_sessoes_v3 (servidor_id, membro_id, id);
+    CREATE INDEX IF NOT EXISTS idx_staff_voz_ranking_v3
+        ON staff_voz_sessoes_v3 (servidor_id, membro_id);
+    CREATE INDEX IF NOT EXISTS idx_staff_voz_periodo_v31
+        ON staff_voz_sessoes_v3 (servidor_id, iniciada_em, encerrada_em);
+    CREATE TABLE IF NOT EXISTS staff_voz_trechos_v31 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sessao_id INTEGER NOT NULL,
+        servidor_id TEXT NOT NULL,
+        membro_id TEXT NOT NULL,
+        canal_id TEXT NOT NULL,
+        iniciada_em INTEGER NOT NULL,
+        ultima_observacao_em INTEGER NOT NULL,
+        encerrada_em INTEGER,
+        CHECK (encerrada_em IS NULL OR encerrada_em >= iniciada_em)
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_voz_trecho_aberto_v31
+        ON staff_voz_trechos_v31 (sessao_id)
+        WHERE encerrada_em IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_staff_voz_trecho_periodo_v31
+        ON staff_voz_trechos_v31 (servidor_id, canal_id, iniciada_em);
 `);
-
-// ==========================================
-// CONSULTAS PREPARADAS
-// ==========================================
 
 const SQL = {
     buscarAberta: db.prepare(`
-        SELECT *
-        FROM staff_voz_sessoes_v3
-        WHERE servidor_id = ?
-          AND membro_id = ?
-          AND encerrada_em IS NULL
-        LIMIT 1
+        SELECT * FROM staff_voz_sessoes_v3
+        WHERE servidor_id = ? AND membro_id = ?
+          AND encerrada_em IS NULL LIMIT 1
     `),
-
     listarAbertas: db.prepare(`
-        SELECT *
-        FROM staff_voz_sessoes_v3
-        WHERE servidor_id = ?
-          AND encerrada_em IS NULL
+        SELECT * FROM staff_voz_sessoes_v3
+        WHERE servidor_id = ? AND encerrada_em IS NULL
         ORDER BY id ASC
     `),
-
     inserir: db.prepare(`
         INSERT INTO staff_voz_sessoes_v3 (
-            servidor_id,
-            membro_id,
-            canal_inicial_id,
-            canal_atual_id,
-            iniciada_em,
-            ultima_observacao_em
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
+            servidor_id, membro_id, canal_inicial_id,
+            canal_atual_id, iniciada_em, ultima_observacao_em
+        ) VALUES (?, ?, ?, ?, ?, ?)
     `),
-
     atualizarObservacao: db.prepare(`
         UPDATE staff_voz_sessoes_v3
-        SET
-            canal_atual_id = ?,
-            ultima_observacao_em = ?
-        WHERE id = ?
-          AND encerrada_em IS NULL
+        SET canal_atual_id = ?, ultima_observacao_em = ?
+        WHERE id = ? AND encerrada_em IS NULL
     `),
-
     encerrar: db.prepare(`
         UPDATE staff_voz_sessoes_v3
-        SET
-            ultima_observacao_em = ?,
-            encerrada_em = ?,
+        SET ultima_observacao_em = ?, encerrada_em = ?,
             motivo_encerramento = ?
-        WHERE id = ?
-          AND encerrada_em IS NULL
+        WHERE id = ? AND encerrada_em IS NULL
     `),
-
     buscarPorId: db.prepare(`
-        SELECT *
-        FROM staff_voz_sessoes_v3
-        WHERE id = ?
+        SELECT * FROM staff_voz_sessoes_v3 WHERE id = ?
     `),
-
     historico: db.prepare(`
-        SELECT *
-        FROM staff_voz_sessoes_v3
-        WHERE servidor_id = ?
-          AND membro_id = ?
-        ORDER BY id DESC
-        LIMIT ?
+        SELECT * FROM staff_voz_sessoes_v3
+        WHERE servidor_id = ? AND membro_id = ?
+        ORDER BY id DESC LIMIT ?
     `),
-
     ranking: db.prepare(`
-        SELECT
-            membro_id,
-
-            COUNT(*) AS total_sessoes,
-
-            SUM(
-                MAX(
-                    0,
-                    COALESCE(
-                        encerrada_em,
-                        ultima_observacao_em
-                    ) - iniciada_em
-                )
-            ) AS tempo_total
-
+        SELECT membro_id, COUNT(*) AS total_sessoes,
+            COALESCE(SUM(MAX(0,
+                COALESCE(encerrada_em, ultima_observacao_em)
+                - iniciada_em
+            )), 0) AS tempo_total
         FROM staff_voz_sessoes_v3
-
         WHERE servidor_id = ?
-
         GROUP BY membro_id
-
-        ORDER BY
-            tempo_total DESC,
-            membro_id ASC
-
+        ORDER BY tempo_total DESC, membro_id ASC
         LIMIT ?
     `),
-
     estatisticas: db.prepare(`
-        SELECT
-            COUNT(*) AS total_sessoes,
-
-            COUNT(
-                DISTINCT membro_id
-            ) AS funcionarios_registrados,
-
+        SELECT COUNT(*) AS total_sessoes,
+            COUNT(DISTINCT membro_id) AS funcionarios_registrados,
             COALESCE(SUM(
-                CASE
-                    WHEN encerrada_em IS NULL
-                    THEN 1 ELSE 0
-                END
+                CASE WHEN encerrada_em IS NULL
+                THEN 1 ELSE 0 END
             ), 0) AS sessoes_abertas,
-
             COALESCE(SUM(
-                CASE
-                    WHEN encerrada_em IS NOT NULL
-                    THEN 1 ELSE 0
-                END
+                CASE WHEN encerrada_em IS NOT NULL
+                THEN 1 ELSE 0 END
             ), 0) AS sessoes_encerradas,
-
-            COALESCE(SUM(
-                MAX(
-                    0,
-                    COALESCE(
-                        encerrada_em,
-                        ultima_observacao_em
-                    ) - iniciada_em
-                )
-            ), 0) AS tempo_total
-
+            COALESCE(SUM(MAX(0,
+                COALESCE(encerrada_em, ultima_observacao_em)
+                - iniciada_em
+            )), 0) AS tempo_total
         FROM staff_voz_sessoes_v3
-
         WHERE servidor_id = ?
+    `),
+    buscarTrechoAberto: db.prepare(`
+        SELECT * FROM staff_voz_trechos_v31
+        WHERE sessao_id = ? AND encerrada_em IS NULL
+        LIMIT 1
+    `),
+    inserirTrecho: db.prepare(`
+        INSERT INTO staff_voz_trechos_v31 (
+            sessao_id, servidor_id, membro_id, canal_id,
+            iniciada_em, ultima_observacao_em
+        ) VALUES (?, ?, ?, ?, ?, ?)
+    `),
+    observarTrecho: db.prepare(`
+        UPDATE staff_voz_trechos_v31
+        SET ultima_observacao_em = ?
+        WHERE id = ? AND encerrada_em IS NULL
+    `),
+    encerrarTrecho: db.prepare(`
+        UPDATE staff_voz_trechos_v31
+        SET ultima_observacao_em = ?, encerrada_em = ?
+        WHERE id = ? AND encerrada_em IS NULL
+    `),
+    rankingPeriodo: db.prepare(`
+        SELECT membro_id, COUNT(*) AS total_sessoes,
+            COALESCE(SUM(MAX(0,
+                MIN(
+                    COALESCE(encerrada_em, ultima_observacao_em),
+                    ?
+                ) - MAX(iniciada_em, ?)
+            )), 0) AS tempo_total
+        FROM staff_voz_sessoes_v3
+        WHERE servidor_id = ?
+          AND iniciada_em < ?
+          AND COALESCE(
+              encerrada_em, ultima_observacao_em
+          ) > ?
+        GROUP BY membro_id
+        ORDER BY tempo_total DESC, membro_id ASC
+        LIMIT ?
+    `),
+    funcionarioPeriodo: db.prepare(`
+        SELECT COUNT(*) AS total_sessoes,
+            COALESCE(SUM(MAX(0,
+                MIN(
+                    COALESCE(encerrada_em, ultima_observacao_em),
+                    ?
+                ) - MAX(iniciada_em, ?)
+            )), 0) AS tempo_total
+        FROM staff_voz_sessoes_v3
+        WHERE servidor_id = ? AND membro_id = ?
+          AND iniciada_em < ?
+          AND COALESCE(
+              encerrada_em, ultima_observacao_em
+          ) > ?
     `)
 };
 
-// ==========================================
-// HORÁRIO ATUAL
-// ==========================================
-
 function agoraSegundos() {
-    return Math.floor(
-        Date.now() / 1000
-    );
+    return Math.floor(Date.now() / 1000);
 }
 
-// ==========================================
-// VALIDAR IDENTIFICADORES
-// ==========================================
+function validarId(valor, nome = 'ID') {
+    const texto = String(valor ?? '').trim();
 
-function validarId(
-    valor,
-    nome = 'ID'
-) {
-    const texto = String(
-        valor ?? ''
-    ).trim();
-
-    if (
-        !/^\d{15,22}$/.test(
-            texto
-        )
-    ) {
-        throw new Error(
-            `${nome} inválido.`
-        );
+    if (!/^\d{15,22}$/.test(texto)) {
+        throw new Error(`${nome} inválido.`);
     }
 
     return texto;
 }
 
 function idOpcional(valor) {
-    const texto = String(
-        valor ?? ''
-    ).trim();
+    const texto = String(valor ?? '').trim();
+    return /^\d{15,22}$/.test(texto) ? texto : null;
+}
 
-    return /^\d{15,22}$/.test(texto)
-        ? texto
+function validarLimite(limite, padrao) {
+    const numero = Number(limite);
+
+    return Number.isSafeInteger(numero) && numero > 0
+        ? Math.min(numero, LIMITE_CONSULTAS)
+        : padrao;
+}
+
+function validarPeriodo(inicioEm, fimEm) {
+    const inicio = Number(inicioEm);
+    const fim = Number(fimEm);
+
+    if (
+        !Number.isSafeInteger(inicio) ||
+        !Number.isSafeInteger(fim) ||
+        inicio < 0 ||
+        fim <= inicio ||
+        fim > 99999999999
+    ) {
+        throw new Error(
+            'Período inválido. Use timestamps Unix em segundos.'
+        );
+    }
+
+    return { inicio, fim };
+}
+
+function formatarTempoVoz(segundos) {
+    const total = Math.max(
+        0,
+        Math.floor(Number(segundos) || 0)
+    );
+
+    const dias = Math.floor(total / 86400);
+    const horas = Math.floor((total % 86400) / 3600);
+    const minutos = Math.floor((total % 3600) / 60);
+    const partes = [];
+
+    if (dias) partes.push(`${dias}d`);
+    if (horas) partes.push(`${horas}h`);
+    if (minutos) partes.push(`${minutos}min`);
+
+    return partes.join(' ') || `${total % 60}s`;
+}
+
+function obterIdCargoEquipe(config = null) {
+    return idOpcional(
+        (config || getConfig()).staff?.cargoId
+    );
+}
+
+function obterCargoEquipe(guild, config = null) {
+    if (!guild?.id) return null;
+
+    const cargoId = obterIdCargoEquipe(config);
+
+    return cargoId
+        ? guild.roles.cache.get(cargoId) || null
         : null;
 }
 
-function validarLimite(
-    limite,
-    padrao
-) {
-    const numero = Number(limite);
+function ehMembroEquipe(membro, config = null) {
+    if (!membro || membro.user?.bot) return false;
 
-    if (
-        !Number.isSafeInteger(numero) ||
-        numero < 1
-    ) {
-        return padrao;
-    }
-
-    return Math.min(
-        numero,
-        LIMITE_CONSULTAS
-    );
-}
-
-// ==========================================
-// FORMATAR TEMPO DE VOZ
-// ==========================================
-
-function formatarTempoVoz(
-    segundos
-) {
-    const total = Math.max(
-        0,
-        Math.floor(
-            Number(segundos) || 0
-        )
-    );
-
-    const dias = Math.floor(
-        total / 86400
-    );
-
-    const horas = Math.floor(
-        (total % 86400) / 3600
-    );
-
-    const minutos = Math.floor(
-        (total % 3600) / 60
-    );
-
-    const restantes =
-        total % 60;
-
-    const partes = [];
-
-    if (dias > 0) {
-        partes.push(
-            `${dias}d`
-        );
-    }
-
-    if (horas > 0) {
-        partes.push(
-            `${horas}h`
-        );
-    }
-
-    if (minutos > 0) {
-        partes.push(
-            `${minutos}min`
-        );
-    }
-
-    if (!partes.length) {
-        partes.push(
-            `${restantes}s`
-        );
-    }
-
-    return partes.join(' ');
-}
-
-// ==========================================
-// CONFIGURAÇÃO DA EQUIPE
-// ==========================================
-
-function obterIdCargoEquipe(
-    config = null
-) {
-    const configuracao =
-        config || getConfig();
-
-    return idOpcional(
-        configuracao.staff?.cargoId
-    );
-}
-
-// ==========================================
-// OBTER CARGO DA EQUIPE
-// ==========================================
-
-function obterCargoEquipe(
-    guild,
-    config = null
-) {
-    if (!guild?.id) {
-        return null;
-    }
-
-    const cargoId =
-        obterIdCargoEquipe(
-            config
-        );
-
-    if (!cargoId) {
-        return null;
-    }
-
-    return guild.roles.cache.get(
-        cargoId
-    ) || null;
-}
-
-// ==========================================
-// VERIFICAR FUNCIONÁRIO
-// ==========================================
-
-function ehMembroEquipe(
-    membro,
-    config = null
-) {
-    if (
-        !membro ||
-        membro.user?.bot
-    ) {
-        return false;
-    }
-
-    const cargoId =
-        obterIdCargoEquipe(
-            config
-        );
-
-    if (!cargoId) {
-        return false;
-    }
+    const cargoId = obterIdCargoEquipe(config);
 
     return Boolean(
-        membro.roles?.cache?.has(
-            cargoId
-        )
+        cargoId && membro.roles?.cache?.has(cargoId)
     );
 }
 
-// ==========================================
-// VERIFICAR INTENT DE VOZ
-// ==========================================
-
-function possuiIntentVoz(
-    guildOuClient
-) {
-    const client =
-        guildOuClient?.client ||
-        guildOuClient;
+function possuiIntentVoz(guildOuClient) {
+    const client = guildOuClient?.client || guildOuClient;
 
     return Boolean(
         client?.options?.intents?.has(
@@ -487,370 +273,250 @@ function possuiIntentVoz(
     );
 }
 
-// ==========================================
-// FILA DE OPERAÇÕES DO SERVIDOR
-// ==========================================
-
-async function executarEmFila(
-    servidorId,
-    tarefa
-) {
-    const servidor =
-        validarId(
-            servidorId,
-            'Servidor'
-        );
-
+async function executarEmFila(servidorId, tarefa) {
+    const servidor = validarId(servidorId, 'Servidor');
     const anterior =
-        FILAS_SERVIDORES.get(
-            servidor
-        ) || Promise.resolve();
+        FILAS_SERVIDORES.get(servidor) || Promise.resolve();
 
     const atual = anterior
         .catch(() => {})
         .then(tarefa);
 
-    FILAS_SERVIDORES.set(
-        servidor,
-        atual
-    );
+    FILAS_SERVIDORES.set(servidor, atual);
 
     try {
         return await atual;
-
     } finally {
-        if (
-            FILAS_SERVIDORES.get(
-                servidor
-            ) === atual
-        ) {
-            FILAS_SERVIDORES.delete(
-                servidor
-            );
+        if (FILAS_SERVIDORES.get(servidor) === atual) {
+            FILAS_SERVIDORES.delete(servidor);
         }
     }
 }
 
-// ==========================================
-// TEMPO DE UMA SESSÃO
-// ==========================================
+function calcularSegundosSessao(sessao) {
+    if (!sessao) return 0;
 
-// Para sessão finalizada:
-// encerrada_em - iniciada_em
-//
-// Para sessão aberta:
-// ultima_observacao_em - iniciada_em
-//
-// Nunca utilizamos Date.now() para
-// estender automaticamente uma sessão
-// sem observação do Discord.
-//
-// Isso impede contar horas de um
-// período em que o bot esteve offline.
-
-function calcularSegundosSessao(
-    sessao
-) {
-    if (!sessao) {
-        return 0;
-    }
-
-    const inicio = Number(
-        sessao.iniciada_em
-    );
-
+    const inicio = Number(sessao.iniciada_em);
     const fim = Number(
         sessao.encerrada_em ??
         sessao.ultima_observacao_em
     );
 
-    if (
-        !Number.isFinite(inicio) ||
-        !Number.isFinite(fim)
-    ) {
-        return 0;
-    }
-
-    return Math.max(
-        0,
-        Math.floor(
-            fim - inicio
-        )
-    );
+    return Number.isFinite(inicio) && Number.isFinite(fim)
+        ? Math.max(0, Math.floor(fim - inicio))
+        : 0;
 }
 
-// ==========================================
-// BUSCAR SESSÃO ABERTA
-// ==========================================
-
-function buscarSessaoAberta(
-    servidorId,
-    membroId
-) {
+function buscarSessaoAberta(servidorId, membroId) {
     return SQL.buscarAberta.get(
-        validarId(
-            servidorId,
-            'Servidor'
-        ),
-
-        validarId(
-            membroId,
-            'Membro'
-        )
+        validarId(servidorId, 'Servidor'),
+        validarId(membroId, 'Membro')
     ) || null;
 }
 
-// ==========================================
-// ENCERRAR SESSÃO INTERNA
-// ==========================================
+function observarTrechoSessao(
+    sessao,
+    canalId,
+    horario,
+    criarSeAusente = true
+) {
+    const atual = SQL.buscarTrechoAberto.get(sessao.id);
+    const canal = validarId(canalId, 'Canal');
 
-// A função recebe o horário final.
-//
-// Para uma saída confirmada pelo
-// Discord, usamos o horário do evento.
-//
-// Para recuperar sessões após
-// reinícios, usamos a última
-// observação salva.
-//
-// Essa diferença impede somar
-// os períodos offline.
+    const observado = Math.max(
+        Number(sessao.iniciada_em),
+        Number(sessao.ultima_observacao_em),
+        Math.floor(horario)
+    );
+
+    if (atual && atual.canal_id === canal) {
+        SQL.observarTrecho.run(
+            Math.max(
+                Number(atual.ultima_observacao_em),
+                observado
+            ),
+            atual.id
+        );
+        return;
+    }
+
+    if (atual) {
+        const encerrado = Math.max(
+            Number(atual.iniciada_em),
+            Number(atual.ultima_observacao_em),
+            observado
+        );
+
+        SQL.encerrarTrecho.run(
+            encerrado,
+            encerrado,
+            atual.id
+        );
+    }
+
+    if (criarSeAusente) {
+        SQL.inserirTrecho.run(
+            sessao.id,
+            sessao.servidor_id,
+            sessao.membro_id,
+            canal,
+            observado,
+            observado
+        );
+    }
+}
 
 function encerrarSessaoInterna(
     sessao,
     motivo,
     horarioFinal
 ) {
-    if (!sessao) {
-        return null;
-    }
+    if (!sessao) return null;
 
-    const inicio = Number(
-        sessao.iniciada_em
-    );
-
-    const ultimo = Number(
-        sessao.ultima_observacao_em
-    );
-
-    const finalDesejado = Number(
-        horarioFinal
-    );
+    const inicio = Number(sessao.iniciada_em);
+    const ultimo = Number(sessao.ultima_observacao_em);
+    const desejado = Number(horarioFinal);
 
     const final = Math.max(
         inicio,
         ultimo,
-        Number.isFinite(finalDesejado)
-            ? Math.floor(finalDesejado)
+        Number.isFinite(desejado)
+            ? Math.floor(desejado)
             : ultimo
     );
 
-    const resultado =
-        SQL.encerrar.run(
-            final,
-            final,
-            String(motivo || 'saida'),
-            sessao.id
+    const resultado = SQL.encerrar.run(
+        final,
+        final,
+        String(motivo || 'saida'),
+        sessao.id
+    );
+
+    if (resultado.changes !== 1) return null;
+
+    const trecho = SQL.buscarTrechoAberto.get(sessao.id);
+
+    if (trecho) {
+        const fimTrecho = Math.max(
+            Number(trecho.iniciada_em),
+            Number(trecho.ultima_observacao_em),
+            final
         );
 
-    if (
-        resultado.changes !== 1
-    ) {
-        return null;
+        SQL.encerrarTrecho.run(
+            fimTrecho,
+            fimTrecho,
+            trecho.id
+        );
     }
 
-    return SQL.buscarPorId.get(
-        sessao.id
-    ) || null;
+    return SQL.buscarPorId.get(sessao.id) || null;
 }
-
-// ==========================================
-// REGISTRAR ENTRADA EM VOZ
-// ==========================================
-
-// Uso:
-//
-// registrarEntradaVoz(
-//     servidorId,
-//     membroId,
-//     canalId
-// );
-//
-// Esta função cria uma sessão aberta.
-//
-// Se já existe uma sessão para
-// o funcionário, não cria outra.
 
 function registrarEntradaVoz(
     servidorId,
     membroId,
     canalId
 ) {
-    const servidor = validarId(
-        servidorId,
-        'Servidor'
-    );
-
-    const membro = validarId(
-        membroId,
-        'Membro'
-    );
-
-    const canal = validarId(
-        canalId,
-        'Canal'
-    );
-
-    const horario =
-        agoraSegundos();
+    const servidor = validarId(servidorId, 'Servidor');
+    const membro = validarId(membroId, 'Membro');
+    const canal = validarId(canalId, 'Canal');
+    const horario = agoraSegundos();
 
     return db.transaction(() => {
-        const existente =
-            buscarSessaoAberta(
-                servidor,
-                membro
-            );
+        const existente = buscarSessaoAberta(
+            servidor,
+            membro
+        );
 
         if (existente) {
             return {
                 tratado: false,
                 criada: false,
-
-                acao:
-                    'sessao_ja_aberta',
-
-                sessao:
-                    existente,
-
-                sessaoId:
-                    existente.id
+                acao: 'sessao_ja_aberta',
+                sessao: existente,
+                sessaoId: existente.id
             };
         }
 
-        const resultado =
-            SQL.inserir.run(
-                servidor,
-                membro,
-                canal,
-                canal,
-                horario,
-                horario
-            );
+        const resultado = SQL.inserir.run(
+            servidor,
+            membro,
+            canal,
+            canal,
+            horario,
+            horario
+        );
 
-        const sessao =
-            SQL.buscarPorId.get(
-                Number(
-                    resultado.lastInsertRowid
-                )
-            );
+        const sessao = SQL.buscarPorId.get(
+            Number(resultado.lastInsertRowid)
+        );
+
+        observarTrechoSessao(
+            sessao,
+            canal,
+            horario
+        );
 
         return {
             tratado: true,
             criada: true,
-
             acao: 'entrada',
-
             sessao,
-            sessaoId:
-                sessao.id,
-
+            sessaoId: sessao.id,
             membroId: membro,
             canalId: canal
         };
     })();
 }
 
-// ==========================================
-// REGISTRAR SAÍDA EM VOZ
-// ==========================================
-
-// A saída é confirmada pelo evento
-// voiceStateUpdate.
-//
-// Ela usa o horário atual, pois
-// a saída foi observada de verdade.
-
 function registrarSaidaVoz(
     servidorId,
     membroId,
     motivo = 'saida_da_voz'
 ) {
-    const servidor = validarId(
-        servidorId,
-        'Servidor'
-    );
-
-    const membro = validarId(
-        membroId,
-        'Membro'
-    );
+    const servidor = validarId(servidorId, 'Servidor');
+    const membro = validarId(membroId, 'Membro');
 
     return db.transaction(() => {
-        const aberta =
-            buscarSessaoAberta(
-                servidor,
-                membro
-            );
+        const aberta = buscarSessaoAberta(
+            servidor,
+            membro
+        );
 
         if (!aberta) {
             return {
                 tratado: false,
                 encerrada: false,
-                motivo:
-                    'Nenhuma sessão aberta'
+                motivo: 'Nenhuma sessão aberta'
             };
         }
 
-        const encerrada =
-            encerrarSessaoInterna(
-                aberta,
-                motivo,
-                agoraSegundos()
-            );
+        const encerrada = encerrarSessaoInterna(
+            aberta,
+            motivo,
+            agoraSegundos()
+        );
 
         if (!encerrada) {
             return {
                 tratado: false,
                 encerrada: false,
-                motivo:
-                    'Não foi possível encerrar a sessão'
+                motivo: 'Não foi possível encerrar a sessão'
             };
         }
 
         return {
             tratado: true,
             encerrada: true,
-
             acao: 'saida',
-
-            sessao:
-                encerrada,
-
-            sessaoId:
-                encerrada.id,
-
+            sessao: encerrada,
+            sessaoId: encerrada.id,
             membroId: membro,
-
-            segundos:
-                calcularSegundosSessao(
-                    encerrada
-                )
+            segundos: calcularSegundosSessao(encerrada)
         };
     })();
 }
-
-// ==========================================
-// CONSULTAR MEMBRO ATUALIZADO
-// ==========================================
-
-// Não confundir erro de consulta
-// com remoção do cargo da equipe.
-//
-// Se a consulta falhar, retornamos
-// null e preservamos a sessão aberta.
-//
-// Isso evita perder dados por
-// instabilidade temporária da API.
 
 async function buscarMembroAtualizado(
     guild,
@@ -861,11 +527,9 @@ async function buscarMembroAtualizado(
             user: membroId,
             force: true
         });
-
     } catch (erro) {
         console.warn(
-            '[InovareSale | Staff] ' +
-            `Não foi possível consultar ${membroId}:`,
+            `[InovareSale | Staff] Não foi possível consultar ${membroId}:`,
             erro.message
         );
 
@@ -873,64 +537,33 @@ async function buscarMembroAtualizado(
     }
 }
 
-// ==========================================
-// ATUALIZAR CANAL DE SESSÃO ABERTA
-// ==========================================
-
 function atualizarCanalSessao(
     sessao,
     canalId,
     horario = agoraSegundos()
 ) {
-    const canal =
-        validarId(
-            canalId,
-            'Canal'
-        );
+    const canal = validarId(canalId, 'Canal');
 
-    const horarioSeguro = Math.max(
-        Number(
-            sessao.iniciada_em
-        ),
-
-        Number(
-            sessao.ultima_observacao_em
-        ),
-
+    const observado = Math.max(
+        Number(sessao.iniciada_em),
+        Number(sessao.ultima_observacao_em),
         Math.floor(horario)
+    );
+
+    observarTrechoSessao(
+        sessao,
+        canal,
+        observado
     );
 
     SQL.atualizarObservacao.run(
         canal,
-        horarioSeguro,
+        observado,
         sessao.id
     );
 
-    return SQL.buscarPorId.get(
-        sessao.id
-    );
+    return SQL.buscarPorId.get(sessao.id);
 }
-
-// ==========================================
-// PROCESSAR MUDANÇA DE CANAL
-// ==========================================
-
-// Utilizado pelo evento:
-//
-// events/voiceStateUpdate.js
-//
-// Casos:
-//
-// 1. Entrou em call
-// 2. Saiu da call
-// 3. Mudou de canal
-// 4. Perdeu o cargo da equipe
-//
-// Mudanças de microfone ou câmera
-// são ignoradas pelo evento.
-//
-// Este serviço também verifica
-// se o canal realmente mudou.
 
 async function processarMudancaVoz(
     estadoAnterior,
@@ -943,14 +576,11 @@ async function processarMudancaVoz(
     if (!guild?.id) {
         return {
             tratado: false,
-            motivo:
-                'Servidor inválido'
+            motivo: 'Servidor inválido'
         };
     }
 
-    const servidorId =
-        guild.id;
-
+    const servidorId = guild.id;
     const membroId =
         estadoAtual?.id ||
         estadoAnterior?.id;
@@ -958,138 +588,72 @@ async function processarMudancaVoz(
     if (!idOpcional(membroId)) {
         return {
             tratado: false,
-            motivo:
-                'Membro inválido'
+            motivo: 'Membro inválido'
         };
     }
 
-    const canalAnterior =
-        idOpcional(
-            estadoAnterior?.channelId
-        );
+    const canalAnterior = idOpcional(
+        estadoAnterior?.channelId
+    );
 
-    const canalAtual =
-        idOpcional(
-            estadoAtual?.channelId
-        );
+    const canalAtual = idOpcional(
+        estadoAtual?.channelId
+    );
 
-    // ======================================
-    // IGNORAR ALTERAÇÕES SEM TROCA
-    // ======================================
-
-    if (
-        canalAnterior === canalAtual
-    ) {
+    if (canalAnterior === canalAtual) {
         return {
             tratado: false,
-            motivo:
-                'Canal de voz não mudou'
+            motivo: 'Canal de voz não mudou'
         };
     }
 
     return executarEmFila(
         servidorId,
         async () => {
-            // ==================================
-            // CONFIGURAÇÃO DA EQUIPE
-            // ==================================
+            const config = getConfig();
 
-            const config =
-                getConfig();
-
-            const cargoId =
-                obterIdCargoEquipe(
-                    config
-                );
-
-            if (!cargoId) {
+            if (!obterIdCargoEquipe(config)) {
                 return {
                     tratado: false,
-                    motivo:
-                        'Cargo da equipe não configurado'
+                    motivo: 'Cargo da equipe não configurado'
                 };
             }
 
-            // ==================================
-            // SESSÃO ANTERIOR
-            // ==================================
+            const aberta = buscarSessaoAberta(
+                servidorId,
+                membroId
+            );
 
-            const aberta =
-                buscarSessaoAberta(
-                    servidorId,
-                    membroId
-                );
-
-            // ==================================
-            // SAÍDA DE CANAL
-            // ==================================
-
-            if (
-                canalAnterior &&
-                !canalAtual
-            ) {
-                if (!aberta) {
-                    return {
+            if (canalAnterior && !canalAtual) {
+                return aberta
+                    ? registrarSaidaVoz(
+                        servidorId,
+                        membroId,
+                        'saida_da_voz'
+                    )
+                    : {
                         tratado: false,
-                        motivo:
-                            'Membro sem sessão aberta'
+                        motivo: 'Membro sem sessão aberta'
                     };
-                }
-
-                return registrarSaidaVoz(
-                    servidorId,
-                    membroId,
-                    'saida_da_voz'
-                );
             }
 
-            // ==================================
-            // VERIFICAR MEMBRO
-            // ==================================
-
-            let membro =
-                await buscarMembroAtualizado(
-                    guild,
-                    membroId
-                );
-
-            // Se falhar a consulta e já
-            // existir uma sessão, podemos
-            // processar uma mudança de
-            // canal sem apagar o histórico.
-            //
-            // Para uma nova entrada,
-            // exigimos confirmação de
-            // que o membro é da equipe.
+            const membro = await buscarMembroAtualizado(
+                guild,
+                membroId
+            );
 
             if (!membro && !aberta) {
                 return {
                     tratado: false,
-                    motivo:
-                        'Não foi possível validar o cargo do membro'
+                    motivo: 'Não foi possível validar o cargo do membro'
                 };
             }
 
-            // ==================================
-            // VERIFICAR CARGO DA EQUIPE
-            // ==================================
-
             if (
                 membro &&
-                !ehMembroEquipe(
-                    membro,
-                    config
-                )
+                !ehMembroEquipe(membro, config)
             ) {
                 if (aberta) {
-                    // O membro perdeu o cargo
-                    // da equipe enquanto
-                    // possuía uma sessão.
-                    //
-                    // A sessão é encerrada
-                    // sem registrar nova
-                    // entrada de funcionário.
-
                     encerrarSessaoInterna(
                         aberta,
                         'cargo_equipe_removido',
@@ -1099,25 +663,11 @@ async function processarMudancaVoz(
 
                 return {
                     tratado: false,
-                    motivo:
-                        'Membro não pertence à equipe'
+                    motivo: 'Membro não pertence à equipe'
                 };
             }
 
-            // ==================================
-            // ENTRADA EM CANAL
-            // ==================================
-
-            if (
-                !canalAnterior &&
-                canalAtual
-            ) {
-                // Se havia sessão antiga
-                // aberta, não assumimos
-                // que o membro esteve
-                // online durante todo
-                // o intervalo desconhecido.
-
+            if (!canalAnterior && canalAtual) {
                 if (aberta) {
                     encerrarSessaoInterna(
                         aberta,
@@ -1133,61 +683,34 @@ async function processarMudancaVoz(
                 );
             }
 
-            // ==================================
-            // MUDANÇA DE CANAL
-            // ==================================
-
-            if (
-                canalAnterior &&
-                canalAtual
-            ) {
+            if (canalAnterior && canalAtual) {
                 if (aberta) {
-                    const sessao =
-                        atualizarCanalSessao(
-                            aberta,
-                            canalAtual
-                        );
+                    const sessao = atualizarCanalSessao(
+                        aberta,
+                        canalAtual
+                    );
 
                     return {
                         tratado: true,
-
-                        acao:
-                            'mudanca_de_canal',
-
+                        acao: 'mudanca_de_canal',
                         criada: false,
-
                         sessao,
-                        sessaoId:
-                            sessao.id,
-
+                        sessaoId: sessao.id,
                         membroId,
-
                         canalAnterior,
                         canalAtual
                     };
                 }
 
-                // Um funcionário pode
-                // entrar no monitoramento
-                // já estando em call.
-                //
-                // Iniciamos a contagem
-                // apenas a partir
-                // desta observação.
-
-                const entrada =
-                    registrarEntradaVoz(
-                        servidorId,
-                        membroId,
-                        canalAtual
-                    );
+                const entrada = registrarEntradaVoz(
+                    servidorId,
+                    membroId,
+                    canalAtual
+                );
 
                 return {
                     ...entrada,
-
-                    acao:
-                        'mudanca_de_canal',
-
+                    acao: 'mudanca_de_canal',
                     canalAnterior,
                     canalAtual
                 };
@@ -1195,36 +718,18 @@ async function processarMudancaVoz(
 
             return {
                 tratado: false,
-                motivo:
-                    'Mudança de voz não reconhecida'
+                motivo: 'Mudança de voz não reconhecida'
             };
         }
     );
 }
-
-// ==========================================
-// BUSCAR FUNCIONÁRIOS EM VOZ
-// ==========================================
-
-// Utiliza o estado de voz atual
-// fornecido pelo Discord.
-//
-// Caso não consiga obter os dados de
-// algum membro, não o classifica
-// como não pertencente à equipe.
-//
-// A sincronização precisa ser
-// confiável antes de encerrar
-// sessões de outros membros.
 
 async function listarEquipeEmVoz(
     guild,
     config = null
 ) {
     if (!guild?.id) {
-        throw new Error(
-            'Servidor inválido.'
-        );
+        throw new Error('Servidor inválido.');
     }
 
     if (!possuiIntentVoz(guild)) {
@@ -1233,308 +738,152 @@ async function listarEquipeEmVoz(
         );
     }
 
-    const configuracao =
-        config || getConfig();
+    const configuracao = config || getConfig();
 
-    const cargoId =
-        obterIdCargoEquipe(
-            configuracao
-        );
-
-    if (!cargoId) {
+    if (!obterIdCargoEquipe(configuracao)) {
         return [];
     }
 
     const membros = [];
 
-    for (
-        const estado
-        of guild.voiceStates.cache.values()
-    ) {
-        if (!estado.channelId) {
-            continue;
-        }
+    for (const estado of guild.voiceStates.cache.values()) {
+        if (!estado.channelId) continue;
 
         let membro =
             estado.member ||
-            guild.members.cache.get(
+            guild.members.cache.get(estado.id);
+
+        if (!membro) {
+            membro = await buscarMembroAtualizado(
+                guild,
                 estado.id
             );
 
-        if (!membro) {
-            membro =
-                await buscarMembroAtualizado(
-                    guild,
-                    estado.id
-                );
-
             if (!membro) {
                 throw new Error(
-                    'Não foi possível consultar ' +
-                    `o membro ${estado.id}. ` +
+                    `Não foi possível consultar o membro ${estado.id}. ` +
                     'A sincronização será adiada.'
                 );
             }
         }
 
-        if (
-            !ehMembroEquipe(
-                membro,
-                configuracao
-            )
-        ) {
-            continue;
+        if (ehMembroEquipe(membro, configuracao)) {
+            membros.push({
+                membroId: membro.id,
+                canalId: estado.channelId,
+                membro
+            });
         }
-
-        membros.push({
-            membroId:
-                membro.id,
-
-            canalId:
-                estado.channelId,
-
-            membro
-        });
     }
 
     return membros;
 }
 
-// ==========================================
-// SINCRONIZAR EQUIPE EM VOZ
-// ==========================================
-
-// Chamado pelo index.js:
-//
-// - Uma vez na inicialização
-// - Depois, a cada cinco minutos
-//
-// PRIMEIRA SINCRONIZAÇÃO:
-//
-// Encerra sessões herdadas do
-// processo anterior exatamente
-// no último horário observado.
-//
-// Isso evita contar o período
-// durante o qual o bot esteve
-// desligado.
-//
-// SINCRONIZAÇÕES POSTERIORES:
-//
-// Atualizam as observações de quem
-// permanece em call.
-//
-// Sessões ausentes são encerradas
-// no último horário observado.
-//
-// Se os dados de voz estiverem
-// incompletos, a sincronização
-// é adiada em vez de encerrar
-// sessões por engano.
-
-async function sincronizarEquipeEmVoz(
-    guild
-) {
+async function sincronizarEquipeEmVoz(guild) {
     if (!guild?.id) {
         return {
             sincronizado: false,
-            motivo:
-                'Servidor inválido'
+            motivo: 'Servidor inválido'
         };
     }
 
     return executarEmFila(
         guild.id,
         async () => {
-            if (
-                !possuiIntentVoz(guild)
-            ) {
+            if (!possuiIntentVoz(guild)) {
                 return {
                     sincronizado: false,
-
-                    motivo:
-                        'Intent de voz não habilitado'
+                    motivo: 'Intent de voz não habilitado'
                 };
             }
 
-            const config =
-                getConfig();
+            const config = getConfig();
 
-            const cargoId =
-                obterIdCargoEquipe(
-                    config
-                );
-
-            if (!cargoId) {
+            if (!obterIdCargoEquipe(config)) {
                 return {
                     sincronizado: false,
-
-                    motivo:
-                        'Cargo da equipe não configurado'
+                    motivo: 'Cargo da equipe não configurado'
                 };
             }
-
-            // ==================================
-            // OBTER PRESENÇA ATUAL
-            // ==================================
 
             let presentes;
 
             try {
-                presentes =
-                    await listarEquipeEmVoz(
-                        guild,
-                        config
-                    );
-
+                presentes = await listarEquipeEmVoz(
+                    guild,
+                    config
+                );
             } catch (erro) {
                 console.warn(
-                    '[InovareSale | Staff] ' +
-                    `Sincronização adiada em ${guild.id}:`,
+                    `[InovareSale | Staff] Sincronização adiada em ${guild.id}:`,
                     erro.message
                 );
 
                 return {
                     sincronizado: false,
-                    motivo:
-                        'Dados de voz incompletos'
+                    motivo: 'Dados de voz incompletos'
                 };
             }
 
-            // ==================================
-            // PREPARAR MAPA DOS PRESENTES
-            // ==================================
-
-            const mapaPresentes =
-                new Map();
-
-            for (
-                const membro
-                of presentes
-            ) {
-                mapaPresentes.set(
+            const mapaPresentes = new Map(
+                presentes.map(membro => [
                     membro.membroId,
                     membro.canalId
-                );
-            }
+                ])
+            );
 
-            const horario =
-                agoraSegundos();
+            const horario = agoraSegundos();
 
             const primeiraSincronizacao =
-                !SERVIDORES_SINCRONIZADOS.has(
+                !SERVIDORES_SINCRONIZADOS.has(guild.id);
+
+            const resultado = db.transaction(() => {
+                const abertas = SQL.listarAbertas.all(
                     guild.id
                 );
 
-            // ==================================
-            // EXECUTAR ALTERAÇÕES NO SQLITE
-            // ==================================
+                let encerradas = 0;
+                let iniciadas = 0;
+                let atualizadas = 0;
 
-            const resultado =
-                db.transaction(() => {
-                    const abertas =
-                        SQL.listarAbertas.all(
-                            guild.id
-                        );
-
-                    let encerradas = 0;
-                    let iniciadas = 0;
-                    let atualizadas = 0;
-
-                    // ==================================
-                    // PRIMEIRA SINCRONIZAÇÃO
-                    // ==================================
-
-                    if (
-                        primeiraSincronizacao
-                    ) {
-                        for (
-                            const sessao
-                            of abertas
+                if (primeiraSincronizacao) {
+                    for (const sessao of abertas) {
+                        if (
+                            encerrarSessaoInterna(
+                                sessao,
+                                'reinicio_bot',
+                                sessao.ultima_observacao_em
+                            )
                         ) {
-                            // Ponto principal da correção:
-                            //
-                            // NÃO fechar no horário atual.
-                            //
-                            // Fechar no último horário
-                            // observado pela execução
-                            // anterior do bot.
-
-                            const finalizada =
-                                encerrarSessaoInterna(
-                                    sessao,
-                                    'reinicio_bot',
-                                    sessao.ultima_observacao_em
-                                );
-
-                            if (finalizada) {
-                                encerradas++;
-                            }
+                            encerradas++;
                         }
-
-                        // Quem está em call agora
-                        // inicia uma NOVA sessão.
-                        //
-                        // Não juntamos o período
-                        // anterior ao atual.
-
-                        for (
-                            const presente
-                            of presentes
-                        ) {
-                            const entrada =
-                                registrarEntradaVoz(
-                                    guild.id,
-                                    presente.membroId,
-                                    presente.canalId
-                                );
-
-                            if (entrada.criada) {
-                                iniciadas++;
-                            }
-                        }
-
-                        return {
-                            iniciadas,
-                            atualizadas,
-                            encerradas
-                        };
                     }
 
-                    // ==================================
-                    // SINCRONIZAÇÃO PERIÓDICA
-                    // ==================================
-
-                    for (
-                        const sessao
-                        of abertas
-                    ) {
-                        const canalAtual =
-                            mapaPresentes.get(
-                                sessao.membro_id
-                            );
+                    for (const presente of presentes) {
+                        if (
+                            registrarEntradaVoz(
+                                guild.id,
+                                presente.membroId,
+                                presente.canalId
+                            ).criada
+                        ) {
+                            iniciadas++;
+                        }
+                    }
+                } else {
+                    for (const sessao of abertas) {
+                        const canalAtual = mapaPresentes.get(
+                            sessao.membro_id
+                        );
 
                         if (!canalAtual) {
-                            // O funcionário não está
-                            // presente na observação
-                            // atual.
-                            //
-                            // Não sabemos o horário
-                            // exato em que ele saiu.
-                            //
-                            // Por isso, encerramos
-                            // no último horário
-                            // conhecido, sem somar
-                            // tempo não confirmado.
-
-                            const finalizada =
+                            if (
                                 encerrarSessaoInterna(
                                     sessao,
                                     'ausente_na_sincronizacao',
                                     sessao.ultima_observacao_em
-                                );
-
-                            if (finalizada) {
+                                )
+                            ) {
                                 encerradas++;
                             }
 
@@ -1550,436 +899,454 @@ async function sincronizarEquipeEmVoz(
                         atualizadas++;
                     }
 
-                    // ==================================
-                    // NOVOS FUNCIONÁRIOS
-                    // ==================================
-
-                    for (
-                        const presente
-                        of presentes
-                    ) {
-                        const aberta =
-                            buscarSessaoAberta(
+                    for (const presente of presentes) {
+                        if (
+                            !buscarSessaoAberta(
                                 guild.id,
                                 presente.membroId
-                            );
-
-                        if (aberta) {
-                            continue;
-                        }
-
-                        const entrada =
-                            registrarEntradaVoz(
-                                guild.id,
-                                presente.membroId,
-                                presente.canalId
-                            );
-
-                        if (entrada.criada) {
-                            iniciadas++;
+                            )
+                        ) {
+                            if (
+                                registrarEntradaVoz(
+                                    guild.id,
+                                    presente.membroId,
+                                    presente.canalId
+                                ).criada
+                            ) {
+                                iniciadas++;
+                            }
                         }
                     }
+                }
 
-                    return {
-                        iniciadas,
-                        atualizadas,
-                        encerradas
-                    };
-                })();
+                return {
+                    iniciadas,
+                    atualizadas,
+                    encerradas
+                };
+            })();
 
-            // ==================================
-            // MARCAR SERVIDOR SINCRONIZADO
-            // ==================================
-
-            SERVIDORES_SINCRONIZADOS.add(
-                guild.id
-            );
+            SERVIDORES_SINCRONIZADOS.add(guild.id);
 
             return {
                 sincronizado: true,
-
                 primeiraSincronizacao,
-
-                funcionariosEmVoz:
-                    presentes.length,
-
-                funcionarios:
-                    presentes.map(
-                        item => ({
-                            membroId:
-                                item.membroId,
-
-                            canalId:
-                                item.canalId
-                        })
-                    ),
-
-                sessoesIniciadas:
-                    resultado.iniciadas,
-
-                sessoesAtualizadas:
-                    resultado.atualizadas,
-
-                sessoesEncerradas:
-                    resultado.encerradas
+                funcionariosEmVoz: presentes.length,
+                funcionarios: presentes.map(item => ({
+                    membroId: item.membroId,
+                    canalId: item.canalId
+                })),
+                sessoesIniciadas: resultado.iniciadas,
+                sessoesAtualizadas: resultado.atualizadas,
+                sessoesEncerradas: resultado.encerradas
             };
         }
     );
 }
-
-// ==========================================
-// RANKING DA EQUIPE
-// ==========================================
-
-// O ranking considera TODAS as
-// sessões de cada funcionário.
-//
-// Para sessões abertas, o limite
-// é a última observação salva.
-//
-// Não conta um período offline
-// após a última observação.
 
 function obterRankingVoz(
     servidorId,
     limite = LIMITE_RANKING
 ) {
-    const servidor =
-        validarId(
-            servidorId,
-            'Servidor'
-        );
-
-    const quantidade =
-        validarLimite(
-            limite,
-            LIMITE_RANKING
-        );
-
-    const linhas =
-        SQL.ranking.all(
-            servidor,
-            quantidade
-        );
-
-    return linhas.map(
-        (linha, indice) => {
-            const segundos = Math.max(
-                0,
-                Number(
-                    linha.tempo_total || 0
-                )
-            );
-
-            return {
-                posicao:
-                    indice + 1,
-
-                membroId:
-                    linha.membro_id,
-
-                totalSessoes:
-                    Number(
-                        linha.total_sessoes || 0
-                    ),
-
-                tempoTotalSegundos:
-                    segundos,
-
-                tempoFormatado:
-                    formatarTempoVoz(
-                        segundos
-                    )
-            };
-        }
+    const servidor = validarId(
+        servidorId,
+        'Servidor'
     );
-}
 
-// ==========================================
-// HISTÓRICO DE UM FUNCIONÁRIO
-// ==========================================
+    return SQL.ranking.all(
+        servidor,
+        validarLimite(limite, LIMITE_RANKING)
+    ).map((linha, indice) => {
+        const segundos = Math.max(
+            0,
+            Number(linha.tempo_total || 0)
+        );
+
+        return {
+            posicao: indice + 1,
+            membroId: linha.membro_id,
+            totalSessoes: Number(
+                linha.total_sessoes || 0
+            ),
+            tempoTotalSegundos: segundos,
+            tempoFormatado: formatarTempoVoz(segundos)
+        };
+    });
+}
 
 function obterHistoricoVozMembro(
     servidorId,
     membroId,
     limite = LIMITE_HISTORICO
 ) {
-    const servidor =
-        validarId(
-            servidorId,
-            'Servidor'
-        );
+    const servidor = validarId(
+        servidorId,
+        'Servidor'
+    );
 
-    const membro =
-        validarId(
-            membroId,
-            'Membro'
-        );
+    const membro = validarId(
+        membroId,
+        'Membro'
+    );
 
-    const quantidade =
-        validarLimite(
-            limite,
-            LIMITE_HISTORICO
-        );
+    return SQL.historico.all(
+        servidor,
+        membro,
+        validarLimite(limite, LIMITE_HISTORICO)
+    ).map(sessao => {
+        const segundos = calcularSegundosSessao(sessao);
 
-    const sessoes =
-        SQL.historico.all(
-            servidor,
-            membro,
-            quantidade
-        );
+        return {
+            ...sessao,
+            aberta: sessao.encerrada_em === null,
+            segundos,
+            tempoFormatado: formatarTempoVoz(segundos)
+        };
+    });
+}
 
-    return sessoes.map(
-        sessao => {
-            const segundos =
-                calcularSegundosSessao(
-                    sessao
-                );
+function obterEstatisticasEquipe(servidorId) {
+    const servidor = validarId(
+        servidorId,
+        'Servidor'
+    );
 
-            return {
-                ...sessao,
+    const linha = SQL.estatisticas.get(servidor);
 
-                aberta:
-                    sessao.encerrada_em === null,
+    const tempoTotal = Math.max(
+        0,
+        Number(linha?.tempo_total || 0)
+    );
 
-                segundos,
+    return {
+        servidorId: servidor,
+        funcionariosRegistrados: Number(
+            linha?.funcionarios_registrados || 0
+        ),
+        totalSessoes: Number(
+            linha?.total_sessoes || 0
+        ),
+        sessoesAbertas: Number(
+            linha?.sessoes_abertas || 0
+        ),
+        sessoesEncerradas: Number(
+            linha?.sessoes_encerradas || 0
+        ),
+        tempoTotalSegundos: tempoTotal,
+        tempoTotalVozSegundos: tempoTotal,
+        tempoTotalFormatado: formatarTempoVoz(
+            tempoTotal
+        )
+    };
+}
 
-                tempoFormatado:
-                    formatarTempoVoz(
-                        segundos
-                    )
-            };
-        }
+function obterCanaisAtendimento(config = null) {
+    const canais =
+        (config || getConfig()).staff?.canaisAtendimento;
+
+    if (!Array.isArray(canais)) {
+        return [];
+    }
+
+    return [
+        ...new Set(
+            canais.map(idOpcional).filter(Boolean)
+        )
+    ];
+}
+
+function obterSegundosAtendimentoPeriodo(
+    servidorId,
+    membroId,
+    inicioEm,
+    fimEm,
+    canais = null
+) {
+    const servidor = validarId(
+        servidorId,
+        'Servidor'
+    );
+
+    const membro = validarId(
+        membroId,
+        'Membro'
+    );
+
+    const { inicio, fim } = validarPeriodo(
+        inicioEm,
+        fimEm
+    );
+
+    const canaisValidos = canais === null
+        ? obterCanaisAtendimento()
+        : [
+            ...new Set(
+                (Array.isArray(canais) ? canais : [])
+                    .map(idOpcional)
+                    .filter(Boolean)
+            )
+        ];
+
+    if (!canaisValidos.length) {
+        return 0;
+    }
+
+    const placeholders = canaisValidos
+        .map(() => '?')
+        .join(', ');
+
+    const stmt = db.prepare(`
+        SELECT COALESCE(SUM(MAX(0,
+            MIN(
+                COALESCE(encerrada_em, ultima_observacao_em),
+                ?
+            ) - MAX(iniciada_em, ?)
+        )), 0) AS segundos
+        FROM staff_voz_trechos_v31
+        WHERE servidor_id = ?
+          AND membro_id = ?
+          AND canal_id IN (${placeholders})
+          AND iniciada_em < ?
+          AND COALESCE(
+              encerrada_em, ultima_observacao_em
+          ) > ?
+    `);
+
+    const linha = stmt.get(
+        fim,
+        inicio,
+        servidor,
+        membro,
+        ...canaisValidos,
+        fim,
+        inicio
+    );
+
+    return Math.max(
+        0,
+        Number(linha?.segundos || 0)
     );
 }
 
-// ==========================================
-// ESTATÍSTICAS GERAIS DA EQUIPE
-// ==========================================
-
-// A soma é feita diretamente pelo
-// SQLite sobre TODAS as sessões.
-//
-// Não usamos a soma de apenas
-// 10 ou 25 posições do ranking.
-//
-// Isso evita perder tempo acumulado
-// por funcionários que não estejam
-// entre os primeiros colocados.
-
-function obterEstatisticasEquipe(
-    servidorId
+function obterRankingVozPeriodo(
+    servidorId,
+    inicioEm,
+    fimEm,
+    limite = LIMITE_RANKING,
+    canais = null
 ) {
-    const servidor =
-        validarId(
-            servidorId,
-            'Servidor'
-        );
+    const servidor = validarId(
+        servidorId,
+        'Servidor'
+    );
 
-    const linha =
-        SQL.estatisticas.get(
-            servidor
-        );
+    const { inicio, fim } = validarPeriodo(
+        inicioEm,
+        fimEm
+    );
 
-    const tempoTotal =
-        Math.max(
-            0,
-            Number(
-                linha?.tempo_total || 0
-            )
+    const quantidade = validarLimite(
+        limite,
+        LIMITE_RANKING
+    );
+
+    const canaisValidos = canais === null
+        ? obterCanaisAtendimento()
+        : canais;
+
+    const linhas = SQL.rankingPeriodo.all(
+        fim,
+        inicio,
+        servidor,
+        fim,
+        inicio,
+        LIMITE_CONSULTAS
+    );
+
+    return linhas
+        .map(linha => {
+            const tempoTotalSegundos = Math.max(
+                0,
+                Number(linha.tempo_total || 0)
+            );
+
+            const tempoAtendimentoSegundos =
+                obterSegundosAtendimentoPeriodo(
+                    servidor,
+                    linha.membro_id,
+                    inicio,
+                    fim,
+                    canaisValidos
+                );
+
+            return {
+                membroId: linha.membro_id,
+                totalSessoes: Number(
+                    linha.total_sessoes || 0
+                ),
+                tempoTotalSegundos,
+                tempoFormatado: formatarTempoVoz(
+                    tempoTotalSegundos
+                ),
+                tempoAtendimentoSegundos,
+                tempoAtendimentoFormatado:
+                    formatarTempoVoz(
+                        tempoAtendimentoSegundos
+                    )
+            };
+        })
+        .sort((a, b) =>
+            b.tempoAtendimentoSegundos -
+            a.tempoAtendimentoSegundos ||
+            b.tempoTotalSegundos -
+            a.tempoTotalSegundos ||
+            a.membroId.localeCompare(b.membroId)
+        )
+        .slice(0, quantidade)
+        .map((item, indice) => ({
+            ...item,
+            posicao: indice + 1
+        }));
+}
+
+function obterVozFuncionarioPeriodo(
+    servidorId,
+    membroId,
+    inicioEm,
+    fimEm,
+    canais = null
+) {
+    const servidor = validarId(
+        servidorId,
+        'Servidor'
+    );
+
+    const membro = validarId(
+        membroId,
+        'Membro'
+    );
+
+    const { inicio, fim } = validarPeriodo(
+        inicioEm,
+        fimEm
+    );
+
+    const linha = SQL.funcionarioPeriodo.get(
+        fim,
+        inicio,
+        servidor,
+        membro,
+        fim,
+        inicio
+    );
+
+    const tempoTotalSegundos = Math.max(
+        0,
+        Number(linha?.tempo_total || 0)
+    );
+
+    const tempoAtendimentoSegundos =
+        obterSegundosAtendimentoPeriodo(
+            servidor,
+            membro,
+            inicio,
+            fim,
+            canais
         );
 
     return {
-        servidorId:
-            servidor,
-
-        funcionariosRegistrados:
-            Number(
-                linha?.funcionarios_registrados || 0
-            ),
-
-        totalSessoes:
-            Number(
-                linha?.total_sessoes || 0
-            ),
-
-        sessoesAbertas:
-            Number(
-                linha?.sessoes_abertas || 0
-            ),
-
-        sessoesEncerradas:
-            Number(
-                linha?.sessoes_encerradas || 0
-            ),
-
-        tempoTotalSegundos:
-            tempoTotal,
-
-        tempoTotalVozSegundos:
-            tempoTotal,
-
-        tempoTotalFormatado:
+        membroId: membro,
+        totalSessoes: Number(
+            linha?.total_sessoes || 0
+        ),
+        tempoTotalSegundos,
+        tempoFormatado: formatarTempoVoz(
+            tempoTotalSegundos
+        ),
+        tempoAtendimentoSegundos,
+        tempoAtendimentoFormatado:
             formatarTempoVoz(
-                tempoTotal
+                tempoAtendimentoSegundos
             )
     };
 }
 
-// ==========================================
-// RESUMO PARA O PAINEL DE STATUS
-// ==========================================
-
-// Utilizado por:
-//
-// services/statusService.js
-//
-// Fornece:
-//
-// - Tempo observado no SQLite
-// - Quantidade de sessões
-// - Funcionários atualmente em voz
-// - Ranking dos funcionários
-//
-// A contagem atual só é considerada
-// disponível quando o cargo da equipe
-// está configurado e o Discord
-// permite consultar a presença.
-
-async function obterResumoEquipe(
-    guild
-) {
+async function obterResumoEquipe(guild) {
     if (!guild?.id) {
         return {
             disponivel: false,
-            motivo:
-                'Servidor inválido',
-
+            motivo: 'Servidor inválido',
             tempoTotalSegundos: null
         };
     }
 
-    const estatisticas =
-        obterEstatisticasEquipe(
-            guild.id
-        );
+    const estatisticas = obterEstatisticasEquipe(
+        guild.id
+    );
 
-    const config =
-        getConfig();
+    const config = getConfig();
 
-    const cargoId =
-        obterIdCargoEquipe(
-            config
-        );
-
-    if (!cargoId) {
+    if (!obterIdCargoEquipe(config)) {
         return {
             ...estatisticas,
-
             disponivel: false,
             configurado: false,
-
-            motivo:
-                'Cargo da equipe não configurado',
-
+            motivo: 'Cargo da equipe não configurado',
             funcionariosEmVoz: null,
             quantidadeEmVoz: null,
-
-            ranking:
-                obterRankingVoz(
-                    guild.id,
-                    10
-                )
+            ranking: obterRankingVoz(guild.id, 10)
         };
     }
 
     try {
-        const presentes =
-            await listarEquipeEmVoz(
-                guild,
-                config
-            );
+        const presentes = await listarEquipeEmVoz(
+            guild,
+            config
+        );
 
         return {
             ...estatisticas,
-
             disponivel: true,
             configurado: true,
-
-            funcionariosEmVoz:
-                presentes.length,
-
-            quantidadeEmVoz:
-                presentes.length,
-
-            membrosEmVoz:
-                presentes.map(
-                    item => ({
-                        membroId:
-                            item.membroId,
-
-                        canalId:
-                            item.canalId
-                    })
-                ),
-
-            ranking:
-                obterRankingVoz(
-                    guild.id,
-                    10
-                )
+            funcionariosEmVoz: presentes.length,
+            quantidadeEmVoz: presentes.length,
+            membrosEmVoz: presentes.map(item => ({
+                membroId: item.membroId,
+                canalId: item.canalId
+            })),
+            ranking: obterRankingVoz(guild.id, 10)
         };
-
-    } catch (erro) {
+    } catch {
         return {
             ...estatisticas,
-
             disponivel: false,
             configurado: true,
-
             motivo:
                 'Não foi possível consultar a presença em voz',
-
             funcionariosEmVoz: null,
             quantidadeEmVoz: null,
-
-            ranking:
-                obterRankingVoz(
-                    guild.id,
-                    10
-                )
+            ranking: obterRankingVoz(guild.id, 10)
         };
     }
 }
 
-// ==========================================
-// EXPORTAÇÕES
-// ==========================================
-
 module.exports = {
-    // Configuração e permissões.
     obterCargoEquipe,
     ehMembroEquipe,
     possuiIntentVoz,
-
-    // Formatação.
     formatarTempoVoz,
-
-    // Sessões de voz.
     buscarSessaoAberta,
     registrarEntradaVoz,
     registrarSaidaVoz,
     processarMudancaVoz,
-
-    // Presença e recuperação.
     listarEquipeEmVoz,
     sincronizarEquipeEmVoz,
-
-    // Ranking e histórico.
     obterRankingVoz,
     obterHistoricoVozMembro,
-
-    // Estatísticas.
     obterEstatisticasEquipe,
-    obterResumoEquipe
+    obterResumoEquipe,
+    obterCanaisAtendimento,
+    obterSegundosAtendimentoPeriodo,
+    obterRankingVozPeriodo,
+    obterVozFuncionarioPeriodo
 };
