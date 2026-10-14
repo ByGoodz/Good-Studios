@@ -5,33 +5,35 @@ const fs = require('fs');
 const path = require('path');
 
 const {
-    EmbedBuilder,
+    ContainerBuilder,
+    TextDisplayBuilder,
+    SectionBuilder,
+    ThumbnailBuilder,
+    MediaGalleryBuilder,
+    MediaGalleryItemBuilder,
+    SeparatorBuilder,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    AttachmentBuilder
+    AttachmentBuilder,
+    MessageFlags
 } = require('discord.js');
 
-// ==========================================
-// INOVARESALE BOT 3.0
-// CENTRAL DE PEDIDOS
-// ==========================================
-
-const COR = 0x9951CB;
-
-const PASTA_ASSETS = path.join(
-    __dirname,
-    '..',
-    'assets'
-);
+const PASTA_ASSETS = path.join(__dirname, '..', 'assets');
 
 const ASSINATURA_PNG = Buffer.from([
     137, 80, 78, 71, 13, 10, 26, 10
 ]);
 
-// ==========================================
-// MODALIDADES DA LOJA
-// ==========================================
+const EMOJI_COMPRA = {
+    id: '1559819924606816366',
+    name: 'ticket'
+};
+
+const EMOJI_CALCULADORA = {
+    id: '1559819896995450900',
+    name: 'money'
+};
 
 const MODALIDADES = [
     {
@@ -51,10 +53,6 @@ const MODALIDADES = [
         nome: 'Robux Via Grupo'
     }
 ];
-
-// ==========================================
-// CARREGAR IMAGENS PNG
-// ==========================================
 
 function carregarImagem(nome) {
     const caminho = path.join(
@@ -99,10 +97,6 @@ function carregarImagem(nome) {
     }
 }
 
-// ==========================================
-// CONSULTAR MODALIDADES DISPONÍVEIS
-// ==========================================
-
 function obterStatusModalidades(config = {}) {
     const bloqueados =
         config.tickets?.bloqueados || {};
@@ -119,9 +113,6 @@ function obterStatusModalidades(config = {}) {
             Number.isFinite(Number(precoK)) &&
             Number(precoK) > 0;
 
-        // Preserva a regra anterior:
-        // Via Grupo começa indisponível até
-        // ser explicitamente liberada no setup.
         const bloqueado =
             modalidade.chave === 'viaGrupo'
                 ? bloqueados.viaGrupo !== false
@@ -134,104 +125,26 @@ function obterStatusModalidades(config = {}) {
     });
 }
 
-// ==========================================
-// VERIFICAR SE A LOJA RECEBE PEDIDOS
-// ==========================================
-
 function temModalidadeDisponivel(config = {}) {
     return obterStatusModalidades(config)
         .some(modalidade => modalidade.disponivel);
 }
 
-// ==========================================
-// EMBED CENTRAL DE PEDIDOS 3.0
-// ==========================================
-
-function criarEmbedPedidos(config = {}) {
-    const disponivel =
-        temModalidadeDisponivel(config);
-
-    const embed = new EmbedBuilder()
-        .setColor(COR)
-        .setTitle(
-            'INOVARESALE | CENTRAL DE PEDIDOS'
-        )
-        .setDescription(
-            'Seja bem-vindo à **InovareSale**!\n' +
-            'Adquira seus Robux com praticidade e ' +
-            'atendimento especializado.'
-        )
-
-        // Informações lado a lado.
-        .addFields(
-            {
-                name: 'Compra de Robux',
-                value:
-                    'Escolha a quantidade e a ' +
-                    'modalidade de entrega desejada.',
-                inline: true
-            },
-            {
-                name: 'Consulta de valores',
-                value:
-                    'Confira os preços atualizados ' +
-                    'em nossa calculadora.',
-                inline: true
-            }
-        );
-
-    if (!disponivel) {
-        embed.addFields({
-            name: 'Disponibilidade',
-            value:
-                'No momento, não há modalidades ' +
-                'liberadas para novos pedidos.',
-            inline: false
-        });
-    }
-
-    embed.addFields({
-        name: 'Como continuar?',
-        value:
-            'Selecione uma das opções abaixo ' +
-            'para iniciar sua compra ou consultar os valores.',
-        inline: false
-    });
-
-    embed.setFooter({
-        text:
-            'InovareSale • Sua loja de Robux'
-    });
-
-    return embed;
-}
-
-// ==========================================
-// BOTÃO DE COMPRA
-// ==========================================
-
 function criarBotaoCompra(config = {}) {
-    const disponivel =
-        temModalidadeDisponivel(config);
-
     return new ButtonBuilder()
         .setCustomId('ticket_abrir')
         .setLabel('Comprar Robux')
-        .setEmoji('🛒')
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(!disponivel);
+        .setEmoji(EMOJI_COMPRA)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(!temModalidadeDisponivel(config));
 }
 
-// ==========================================
-// BOTÃO DA CALCULADORA
-// ==========================================
-
 function criarBotaoCalculadora(config = {}, guildId) {
-    const canalId =
-        config.calculadora?.canalId;
-
     const idServidor = String(guildId || '');
-    const idCanal = String(canalId || '');
+
+    const idCanal = String(
+        config.calculadora?.canalId || ''
+    );
 
     if (
         /^\d{17,20}$/.test(idServidor) &&
@@ -239,7 +152,7 @@ function criarBotaoCalculadora(config = {}, guildId) {
     ) {
         return new ButtonBuilder()
             .setLabel('Calcular valores')
-            .setEmoji('🧮')
+            .setEmoji(EMOJI_CALCULADORA)
             .setStyle(ButtonStyle.Link)
             .setURL(
                 `https://discord.com/channels/${idServidor}/${idCanal}`
@@ -247,91 +160,146 @@ function criarBotaoCalculadora(config = {}, guildId) {
     }
 
     return new ButtonBuilder()
-        .setCustomId(
-            'ticket_calculadora_indisponivel'
-        )
+        .setCustomId('ticket_calculadora_indisponivel')
         .setLabel('Calcular valores')
-        .setEmoji('🧮')
+        .setEmoji(EMOJI_CALCULADORA)
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(true);
 }
 
-// ==========================================
-// GERAR PAINEL DE PEDIDOS COMPLETO
-// ==========================================
+function criarContainerPedidos(config = {}, imagens = {}) {
+    const container = new ContainerBuilder();
+
+    const cabecalho = new TextDisplayBuilder()
+        .setContent(
+            '# INOVARESALE | CENTRAL DE PEDIDOS\n' +
+            'Seja bem-vindo à **InovareSale**!\n' +
+            'Adquira seus Robux com praticidade ' +
+            'e atendimento especializado.'
+        );
+
+    if (imagens.logo) {
+        container.addSectionComponents(
+            new SectionBuilder()
+                .addTextDisplayComponents(cabecalho)
+                .setThumbnailAccessory(
+                    new ThumbnailBuilder()
+                        .setURL('attachment://logo.png')
+                        .setDescription('InovareSale')
+                )
+        );
+    } else {
+        container.addTextDisplayComponents(cabecalho);
+    }
+
+    container
+        .addSeparatorComponents(
+            new SeparatorBuilder()
+                .setDivider(true)
+        )
+        .addTextDisplayComponents(
+            new TextDisplayBuilder()
+                .setContent(
+                    '**Compra de Robux**\n' +
+                    'Escolha a quantidade e a modalidade ' +
+                    'de entrega desejada.\n\n' +
+                    '**Consulta de valores**\n' +
+                    'Confira os preços atualizados ' +
+                    'em nossa calculadora.'
+                )
+        );
+
+    if (!temModalidadeDisponivel(config)) {
+        container.addTextDisplayComponents(
+            new TextDisplayBuilder()
+                .setContent(
+                    '**Disponibilidade**\n' +
+                    'No momento, não há modalidades ' +
+                    'liberadas para novos pedidos.'
+                )
+        );
+    }
+
+    container
+        .addSeparatorComponents(
+            new SeparatorBuilder()
+                .setDivider(true)
+        )
+        .addTextDisplayComponents(
+            new TextDisplayBuilder()
+                .setContent(
+                    '**Como continuar?**\n' +
+                    'Selecione uma das opções abaixo ' +
+                    'para iniciar sua compra ou ' +
+                    'consultar os valores.'
+                )
+        );
+
+    if (imagens.banner) {
+        container.addMediaGalleryComponents(
+            new MediaGalleryBuilder()
+                .addItems(
+                    new MediaGalleryItemBuilder()
+                        .setURL('attachment://banner.png')
+                        .setDescription(
+                            'InovareSale • Robux Store'
+                        )
+                )
+        );
+    }
+
+    return container;
+}
+
+function criarEmbedPedidos(config = {}) {
+    return criarContainerPedidos(config);
+}
 
 function criarPainelPedidos(
     config = {},
     guildId = null
 ) {
-    const embed = criarEmbedPedidos(config);
-
-    const arquivos = [];
-
-    // ==================================
-    // LOGO NO CANTO SUPERIOR
-    // ==================================
-
     const logo = carregarImagem('logo.png');
-
-    if (logo) {
-        arquivos.push(logo);
-
-        embed.setThumbnail(
-            'attachment://logo.png'
-        );
-    }
-
-    // ==================================
-    // BANNER DA INOVARESALE
-    // ==================================
-
-    // O Discord exibirá a imagem abaixo
-    // das informações e acima dos botões.
     const banner = carregarImagem('banner.png');
 
-    if (banner) {
-        arquivos.push(banner);
+    const arquivos = [
+        logo,
+        banner
+    ].filter(Boolean);
 
-        embed.setImage(
-            'attachment://banner.png'
+    const container = criarContainerPedidos(
+        config,
+        {
+            logo: Boolean(logo),
+            banner: Boolean(banner)
+        }
+    );
+
+    container
+        .addSeparatorComponents(
+            new SeparatorBuilder()
+                .setDivider(true)
+        )
+        .addActionRowComponents(
+            new ActionRowBuilder()
+                .addComponents(
+                    criarBotaoCompra(config),
+                    criarBotaoCalculadora(
+                        config,
+                        guildId
+                    )
+                )
         );
-    }
-
-    // ==================================
-    // BOTÕES PRINCIPAIS
-    // ==================================
-
-    const botoes = new ActionRowBuilder()
-        .addComponents(
-            criarBotaoCompra(config),
-            criarBotaoCalculadora(
-                config,
-                guildId
-            )
-        );
-
-    // ==================================
-    // RETORNO DO PAINEL
-    // ==================================
 
     return {
-        embeds: [embed],
-        components: [botoes],
+        components: [container],
         files: arquivos,
-
+        flags: MessageFlags.IsComponentsV2,
         allowedMentions: {
             parse: []
         }
     };
 }
-
-// ==========================================
-// EXPORTAÇÕES
-// ==========================================
-
-// Mantemos os mesmos nomes de funções
-// utilizados pelo restante do bot.
 
 module.exports = {
     criarPainelPedidos,
