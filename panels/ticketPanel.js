@@ -1,76 +1,46 @@
-
 'use strict';
-
-const fs = require('fs');
-const path = require('path');
-
 const {
     EmbedBuilder,
+    ContainerBuilder,
+    TextDisplayBuilder,
+    SectionBuilder,
+    ThumbnailBuilder,
+    SeparatorBuilder,
+    MessageFlags,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    AttachmentBuilder,
     escapeMarkdown
 } = require('discord.js');
-
-// ==========================================
-// INOVARESALE BOT 3.0
-// PAINÉIS DO SISTEMA DE TICKETS
-// ==========================================
-
 const COR_PRINCIPAL = 0x9951CB;
-
-const CAMINHO_BANNER = path.join(
-    __dirname,
-    '..',
-    'assets',
-    'banner.png'
-);
-
-const ASSINATURA_PNG = Buffer.from([
-    137, 80, 78, 71, 13, 10, 26, 10
-]);
-
 const METODOS = {
     viaPlus: 'Via Plus',
     semTaxa: 'Robux Sem Taxa',
     taxado: 'Robux Taxado',
     viaGrupo: 'Robux Via Grupo'
 };
-
-// ==========================================
-// FORMATAÇÕES
-// ==========================================
-
 function formatarRobux(valor) {
     const numero = Number(valor || 0);
-
     if (!Number.isFinite(numero)) {
         return '0';
     }
-
     return Math.floor(Math.max(0, numero))
         .toLocaleString('pt-BR');
 }
-
 function formatarPedido(id) {
     return `INV-${String(id).padStart(4, '0')}`;
 }
-
 function nomeMetodo(chave) {
     return METODOS[chave] || 'Não informado';
 }
-
 function nomePagamento(chave) {
     const nomes = {
         pix: 'PIX',
         mm: 'Solicitar MM',
         outro: 'Outro'
     };
-
     return nomes[chave] || 'Não informado';
 }
-
 function nomeStatus(status) {
     const estados = {
         criando: 'Criando pedido',
@@ -80,114 +50,44 @@ function nomeStatus(status) {
         finalizado: 'Compra concluída',
         cancelado: 'Pedido cancelado'
     };
-
     return estados[status] || 'Aguardando atendimento';
 }
-
 function textoSeguro(valor, limite = 60) {
     const texto = String(valor || 'Não informado')
         .replace(/[\r\n\t]/g, ' ')
         .trim()
         .slice(0, limite);
-
     return escapeMarkdown(texto || 'Não informado');
 }
-
-// ==========================================
-// BANNER ORIGINAL DA INOVARESALE
-// ==========================================
-
-function carregarBanner() {
-    try {
-        if (!fs.existsSync(CAMINHO_BANNER)) {
-            console.warn(
-                '[TicketPanel] assets/banner.png não encontrado.'
-            );
-            return null;
-        }
-
-        const dados = fs.readFileSync(CAMINHO_BANNER);
-
-        if (
-            dados.length < 100 ||
-            dados.length > 8 * 1024 * 1024 ||
-            !dados.subarray(0, 8).equals(ASSINATURA_PNG)
-        ) {
-            console.warn(
-                '[TicketPanel] banner.png inválido ou muito grande.'
-            );
-            return null;
-        }
-
-        return new AttachmentBuilder(dados, {
-            name: 'banner.png'
-        });
-
-    } catch (erro) {
-        console.error(
-            '[TicketPanel] Erro ao carregar banner:',
-            erro.message
-        );
-        return null;
-    }
-}
-
-function adicionarBanner(embed, resposta) {
-    const banner = carregarBanner();
-
-    if (banner) {
-        embed.setImage('attachment://banner.png');
-        resposta.files = [banner];
-    }
-
-    return resposta;
-}
-
-// ==========================================
-// VERIFICAR MODALIDADE DISPONÍVEL
-// ==========================================
-
 function metodoDisponivel(config = {}, chave) {
     if (!METODOS[chave]) {
         return false;
     }
-
     const bloqueados = config.tickets?.bloqueados || {};
     const precoK = config.calculadora?.[chave];
-
     const precoValido =
         precoK !== null &&
         precoK !== undefined &&
         Number.isFinite(Number(precoK)) &&
         Number(precoK) > 0;
-
-    // Via Grupo permanece bloqueada por padrão.
     if (
         chave === 'viaGrupo' &&
         bloqueados.viaGrupo !== false
     ) {
         return false;
     }
-
     return (
         bloqueados[chave] !== true &&
         precoValido
     );
 }
-
-// ==========================================
-// BOTÕES DE MODALIDADE
-// ==========================================
-
 function criarBotoesModalidades(config = {}) {
     const linha = new ActionRowBuilder();
-
     for (const [chave, nome] of Object.entries(METODOS)) {
         const disponivel = metodoDisponivel(
             config,
             chave
         );
-
         linha.addComponents(
             new ButtonBuilder()
                 .setCustomId(`ticket_metodo_${chave}`)
@@ -200,14 +100,8 @@ function criarBotoesModalidades(config = {}) {
                 .setDisabled(!disponivel)
         );
     }
-
     return linha;
 }
-
-// ==========================================
-// PAINEL DE ESCOLHA DA MODALIDADE
-// ==========================================
-
 function criarPainelModalidades(
     config = {},
     quantidade = 0
@@ -260,7 +154,6 @@ function criarPainelModalidades(
         .setFooter({
             text: 'InovareSale • Selecione uma modalidade'
         });
-
     return {
         embeds: [embed],
         components: [
@@ -271,17 +164,6 @@ function criarPainelModalidades(
         }
     };
 }
-
-// ==========================================
-// PAINEL DE ESCOLHA DO PAGAMENTO
-// ==========================================
-
-// O parâmetro precoCentavos continua aceito
-// por compatibilidade, mas NÃO é exibido.
-//
-// O preço permanece calculado internamente
-// pelo sistema de pedidos.
-
 function criarPainelPagamento({
     quantidade,
     modalidade,
@@ -334,7 +216,6 @@ function criarPainelPagamento({
         .setFooter({
             text: 'InovareSale • Atendimento seguro'
         });
-
     const botoes = new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder()
@@ -342,14 +223,12 @@ function criarPainelPagamento({
                 .setLabel('PIX')
                 .setEmoji('💚')
                 .setStyle(ButtonStyle.Success),
-
             new ButtonBuilder()
                 .setCustomId('ticket_pagamento_mm')
                 .setLabel('Solicitar MM')
                 .setEmoji('🤝')
                 .setStyle(ButtonStyle.Secondary)
         );
-
     return {
         embeds: [embed],
         components: [botoes],
@@ -358,200 +237,226 @@ function criarPainelPagamento({
         }
     };
 }
-
-// ==========================================
-// BOTÕES PRINCIPAIS DO TICKET
-// ==========================================
-
 function criarBotoesTicket() {
-    return new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId('ticket_assumir')
-                .setLabel('Assumir ticket')
-                .setStyle(ButtonStyle.Primary),
-
-            new ButtonBuilder()
-                .setCustomId('ticket_finalizar')
-                .setLabel('Concluir compra')
-                .setStyle(ButtonStyle.Success),
-
-            new ButtonBuilder()
-                .setCustomId('ticket_cancelar')
-                .setLabel('Fechar ticket')
-                .setStyle(ButtonStyle.Danger)
-        );
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('ticket_assumir')
+            .setLabel('Assumir atendimento')
+            .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId('ticket_finalizar')
+            .setLabel('Finalizar venda')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('ticket_cancelar')
+            .setLabel('Cancelar')
+            .setStyle(ButtonStyle.Danger)
+    );
 }
 
-// ==========================================
-// PAINEL PRINCIPAL DO TICKET 3.0
-// ==========================================
+async function buscarJsonRoblox(url, opcoes = {}) {
+    const resposta = await fetch(url, {
+        ...opcoes,
+        signal: AbortSignal.timeout(4500),
+        headers: {
+            Accept: 'application/json',
+            ...(opcoes.body ? { 'Content-Type': 'application/json' } : {})
+        }
+    });
+    if (!resposta.ok) {
+        throw new Error(`Roblox HTTP ${resposta.status}`);
+    }
+    return resposta.json();
+}
 
-function criarPainelTicket(
-    ticket = {},
-    usuarioRoblox = null,
-    orcamento = {}
-) {
-    const pedidoId = formatarPedido(
-        ticket.id || 0
-    );
+async function consultarPerfilRoblox(username) {
+    const nomeDigitado = String(username || '').trim();
+    if (!/^[A-Za-z0-9_]{3,20}$/.test(nomeDigitado)) {
+        return { encontrado: false, username: nomeDigitado, indisponivel: false };
+    }
 
-    const clienteId = String(
-        ticket.cliente_id || ''
-    );
-
-    const quantidade = formatarRobux(
-        ticket.quantidade_robux
-    );
-
-    const modalidade = nomeMetodo(
-        ticket.modalidade
-    );
-
-    const usuario = textoSeguro(
-        usuarioRoblox ||
-        ticket.usuario_roblox ||
-        'Não informado',
-        30
-    );
-
-    const pagamento = nomePagamento(
-        ticket.pagamento
-    );
-
-    const status = nomeStatus(
-        ticket.status
-    );
-
-    const recebido = orcamento.recebido ??
-        ticket.quantidade_robux;
-
-    const gamepass = orcamento.gamepass ?? null;
-
-    const embed = new EmbedBuilder()
-        .setColor(COR_PRINCIPAL)
-        .setTitle(
-            'INOVARESALE | PEDIDO DE ROBUX'
-        )
-        .setDescription(
-            `Olá, ${
-                /^\d{17,20}$/.test(clienteId)
-                    ? `<@${clienteId}>`
-                    : 'cliente'
-            }! Seu ticket foi criado com sucesso.\n\n` +
-            'Nossa equipe realizará o atendimento em breve.'
+    try {
+        const busca = await buscarJsonRoblox(
+            'https://users.roblox.com/v1/usernames/users',
+            {
+                method: 'POST',
+                body: JSON.stringify({
+                    usernames: [nomeDigitado],
+                    excludeBannedUsers: false
+                })
+            }
         );
 
-    // ==================================
-    // INFORMAÇÕES LADO A LADO
-    // ==================================
+        const usuario = Array.isArray(busca?.data)
+            ? busca.data.find(item => Number.isSafeInteger(Number(item?.id)))
+            : null;
 
-    embed.addFields(
-        {
-            name: 'Quantidade',
-            value: `${quantidade} Robux`,
-            inline: true
-        },
-        {
-            name: 'Modalidade',
-            value: modalidade,
-            inline: true
-        },
-        {
-            name: 'Usuário Roblox',
-            value: usuario,
-            inline: true
-        },
-        {
-            name: 'Status',
-            value: status,
-            inline: true
-        },
-        {
-            name: 'Pagamento',
-            value: pagamento,
-            inline: true
-        },
-        {
-            name: 'Pedido',
-            value: pedidoId,
-            inline: true
+        if (!usuario) {
+            return { encontrado: false, username: nomeDigitado, indisponivel: false };
         }
+
+        const id = Number(usuario.id);
+        const [detalhes, miniatura] = await Promise.allSettled([
+            buscarJsonRoblox(`https://users.roblox.com/v1/users/${id}`),
+            buscarJsonRoblox(
+                `https://thumbnails.roblox.com/v1/users/avatar?userIds=${id}&size=420x420&format=Png&isCircular=false`
+            )
+        ]);
+
+        const dados = detalhes.status === 'fulfilled' ? detalhes.value : null;
+        const imagem = miniatura.status === 'fulfilled'
+            ? miniatura.value?.data?.[0]?.imageUrl
+            : null;
+        const avatarUrl = typeof imagem === 'string' &&
+            /^https:\/\/[^/]+\.rbxcdn\.com\//i.test(imagem)
+                ? imagem
+                : null;
+
+        return {
+            encontrado: true,
+            id,
+            username: String(dados?.name || usuario.name || nomeDigitado),
+            displayName: String(dados?.displayName || usuario.displayName || usuario.name || nomeDigitado),
+            criadoEm: dados?.created || null,
+            avatarUrl,
+            indisponivel: false
+        };
+    } catch (erro) {
+        console.warn('[InovareSale | Roblox] Falha na consulta do perfil:', erro.message);
+        return { encontrado: false, username: nomeDigitado, indisponivel: true };
+    }
+}
+
+function formatarCriacaoRoblox(data) {
+    if (!data) return 'Não disponível';
+    const milissegundos = Date.parse(data);
+    if (!Number.isFinite(milissegundos)) return 'Não disponível';
+    const timestamp = Math.floor(milissegundos / 1000);
+    return `<t:${timestamp}:F> (<t:${timestamp}:R>)`;
+}
+
+function criarPainelPerfilRoblox(perfil = {}) {
+    const confirmado = perfil.encontrado === true &&
+        Number.isSafeInteger(Number(perfil.id)) && Number(perfil.id) > 0;
+    const usuario = textoSeguro(perfil.username || 'Não informado', 30);
+    const display = textoSeguro(perfil.displayName || perfil.username || 'Não informado', 60);
+
+    const linhas = confirmado
+        ? [
+            '**Informações do usuário:**',
+            `• **Roblox ID:** \`${Number(perfil.id)}\``,
+            `• **Roblox username:** \`@${usuario}\``,
+            `• **Roblox display name:** ${display}`,
+            `• **Criada em:** ${formatarCriacaoRoblox(perfil.criadoEm)}`
+        ]
+        : [
+            `**Username informado:** \`@${usuario}\``,
+            perfil.indisponivel
+                ? 'A consulta ao Roblox está temporariamente indisponível. A equipe deve conferir o perfil.'
+                : 'Não foi possível localizar esse username no Roblox. Confirme o nome com a equipe.'
+        ];
+
+    const titulo = new TextDisplayBuilder().setContent(
+        `# Usuário no Roblox — @${usuario}\n${linhas.join('\n')}`
     );
+    const container = new ContainerBuilder().setAccentColor(COR_PRINCIPAL);
 
-    // ==================================
-    // INFORMAÇÕES SOBRE A ENTREGA
-    // ==================================
-
-    if (
-        recebido !== null &&
-        recebido !== undefined &&
-        Number.isFinite(Number(recebido))
-    ) {
-        embed.addFields({
-            name: 'Robux a receber',
-            value:
-                `${formatarRobux(recebido)} Robux`,
-            inline: true
-        });
+    if (confirmado && perfil.avatarUrl) {
+        container.addSectionComponents(
+            new SectionBuilder()
+                .addTextDisplayComponents(titulo)
+                .setThumbnailAccessory(
+                    new ThumbnailBuilder()
+                        .setURL(perfil.avatarUrl)
+                        .setDescription('Avatar do usuário Roblox')
+                )
+        );
+    } else {
+        container.addTextDisplayComponents(titulo);
     }
 
-    if (
-        gamepass !== null &&
-        gamepass !== undefined &&
-        Number.isFinite(Number(gamepass))
-    ) {
-        embed.addFields({
-            name: 'Gamepass necessária',
-            value:
-                `${formatarRobux(gamepass)} Robux`,
-            inline: true
-        });
+    if (confirmado) {
+        const id = Number(perfil.id);
+        container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
+        container.addActionRowComponents(
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setLabel('Ver grupos')
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(`https://www.roblox.com/users/${id}/profile#!/groups`),
+                new ButtonBuilder()
+                    .setLabel('Ver perfil')
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(`https://www.roblox.com/users/${id}/profile`)
+            )
+        );
     }
 
-    // ==================================
-    // AVISO DE SEGURANÇA
-    // ==================================
-
-    embed.addFields({
-        name: 'Informações importantes',
-        value:
-            'Aguarde um atendente iniciar o atendimento.\n' +
-            'Não compartilhe senhas nem realize pagamentos ' +
-            'antes das orientações da equipe.',
-        inline: false
-    });
-
-    embed.setFooter({
-        text: `InovareSale • ${pedidoId}`
-    });
-
-    embed.setTimestamp();
-
-    // ==================================
-    // PREPARAR RESPOSTA
-    // ==================================
-
-    const resposta = {
-        embeds: [embed],
-        components: [
-            criarBotoesTicket()
-        ],
-        allowedMentions: {
-            parse: []
-        }
+    return {
+        components: [container],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] }
     };
-
-    // Banner original abaixo dos campos
-    // do embed, acima dos botões.
-    adicionarBanner(embed, resposta);
-
-    return resposta;
 }
 
-// ==========================================
-// AVISO DE INTERMEDIÁRIO (MM)
-// ==========================================
+function criarPainelTicket(ticket = {}, usuarioRoblox = null, orcamento = {}) {
+    const pedidoId = formatarPedido(ticket.id || 0);
+    const clienteId = String(ticket.cliente_id || '');
+    const cliente = /^\d{15,22}$/.test(clienteId) ? `<@${clienteId}>` : 'Não informado';
+    const usuario = textoSeguro(usuarioRoblox || ticket.usuario_roblox || 'Não informado', 30);
+    const quantidade = formatarRobux(ticket.quantidade_robux);
+    const recebido = orcamento.recebido ?? ticket.quantidade_robux;
+    const gamepass = orcamento.gamepass ?? null;
+    const estado = nomeStatus(ticket.status || 'aberto');
+
+    const informacoes = [
+        '**Informações da compra:**',
+        `• **Cliente:** ${cliente}`,
+        `• **Usuário Roblox:** \`@${usuario}\``,
+        `• **Quantidade solicitada:** ${quantidade} Robux`,
+        `• **Robux a receber:** ${formatarRobux(recebido)} Robux`,
+        `• **Modalidade:** ${nomeMetodo(ticket.modalidade)}`,
+        `• **Pagamento escolhido:** ${nomePagamento(ticket.pagamento)}`
+    ];
+
+    if (gamepass !== null && gamepass !== undefined && Number.isFinite(Number(gamepass))) {
+        informacoes.push(`• **Gamepass necessária:** ${formatarRobux(gamepass)} Robux`);
+    }
+
+    const status = [
+        `**Status do pedido:** ${estado}`,
+        'Aguarde o atendimento da nossa equipe. O pagamento ainda não foi confirmado.',
+        '',
+        '**Segurança:** Nunca envie senhas ou códigos de verificação.',
+        'Aguarde as instruções da equipe antes de efetuar qualquer pagamento.'
+    ];
+
+    if (ticket.pagamento === 'mm') {
+        status.push('', '**Intermediário solicitado:** A equipe organizará a intermediação. Não faça pagamentos antecipados.');
+    }
+
+    const container = new ContainerBuilder()
+        .setAccentColor(COR_PRINCIPAL)
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(`# Pedido ${pedidoId}\nAtendimento InovareSale`)
+        )
+        .addSeparatorComponents(new SeparatorBuilder().setDivider(true))
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(informacoes.join('\n'))
+        )
+        .addSeparatorComponents(new SeparatorBuilder().setDivider(true))
+        .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(status.join('\n'))
+        )
+        .addSeparatorComponents(new SeparatorBuilder().setDivider(true))
+        .addActionRowComponents(criarBotoesTicket());
+
+    return {
+        components: [container],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] }
+    };
+}
 
 function criarAvisoMM() {
     const embed = new EmbedBuilder()
@@ -576,7 +481,6 @@ function criarAvisoMM() {
         .setFooter({
             text: 'InovareSale • Atendimento'
         });
-
     return {
         embeds: [embed],
         allowedMentions: {
@@ -584,15 +488,12 @@ function criarAvisoMM() {
         }
     };
 }
-
-// ==========================================
-// EXPORTAÇÕES COMPATÍVEIS
-// ==========================================
-
 module.exports = {
     criarPainelModalidades,
     criarPainelPagamento,
     criarPainelTicket,
+    criarPainelPerfilRoblox,
+    consultarPerfilRoblox,
     criarBotoesTicket,
     criarAvisoMM,
     formatarPedido,

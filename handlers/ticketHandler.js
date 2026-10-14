@@ -1,6 +1,4 @@
-
 'use strict';
-
 const {
     ActionRowBuilder,
     ButtonBuilder,
@@ -8,20 +6,16 @@ const {
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
-    EmbedBuilder,
     ChannelType,
     PermissionFlagsBits,
     MessageFlags
 } = require('discord.js');
-
 const {
     db
 } = require('../database/db');
-
 const {
     getConfig
 } = require('../utils/storage');
-
 const {
     calcularPreco,
     calcularSemTaxa,
@@ -29,7 +23,6 @@ const {
     formatarDinheiro,
     formatarRobux
 } = require('../utils/calculator');
-
 const {
     criarRegistroTicket,
     vincularCanalTicket,
@@ -42,130 +35,55 @@ const {
     buscarTicketPorCanal,
     buscarTicket
 } = require('../services/ticketService');
-
 const {
     registrarVenda
 } = require('../services/vendaService');
-
 const {
     registrarLogSistema,
     TIPOS_LOG
 } = require('../services/logsService');
-
-// ==========================================
-// INOVARESALE BOT 3.0
-// HANDLER COMPLETO DE TICKETS
-// ==========================================
-
-// FUNCIONALIDADES:
-//
-// - Abrir pedidos de Robux
-// - Escolher quantidade e modalidade
-// - Solicitar username Roblox
-// - Escolher PIX ou MM
-// - Criar canais privados
-// - Registrar tickets no SQLite
-// - Assumir atendimento
-// - Cancelar pedidos
-// - Finalizar vendas
-// - Impedir vendas duplicadas
-// - Registrar eventos nos logs
-// - Solicitar avaliação após a compra
-// - Preservar histórico de pedidos
-//
-// REGRA IMPORTANTE:
-//
-// O painel dentro do ticket NÃO
-// apresenta valores em reais.
-//
-// O preço pode ser exibido na etapa
-// privada de compra e no formulário
-// de finalização da equipe.
-//
-// O anúncio de venda continua sendo
-// responsabilidade do vendaService.js.
-//
-// NÃO APAGAR HISTÓRICOS ANTIGOS.
-
-// ==========================================
-// CONFIGURAÇÕES
-// ==========================================
-
-const COR = 0x9951CB;
-
+const {
+    criarPainelTicket,
+    criarPainelPerfilRoblox,
+    consultarPerfilRoblox
+} = require('../panels/ticketPanel');
 const TEMPO_RASCUNHO =
     30 * 60 * 1000;
-
 const TEMPO_FECHAMENTO =
     7000;
-
 const METODOS = Object.freeze({
     viaPlus: 'Via Plus',
     semTaxa: 'Robux Sem Taxa',
     taxado: 'Robux Taxado',
     viaGrupo: 'Robux Via Grupo'
 });
-
 const PAGAMENTOS = Object.freeze({
     pix: 'PIX',
     mm: 'Solicitar MM'
 });
-
-// Impede duas criações simultâneas
-// para o mesmo cliente.
-
 const TICKETS_EM_CRIACAO =
     new Set();
-
-// ==========================================
-// TABELA DE RASCUNHOS
-// ==========================================
-
-// Mantém a estrutura antiga.
-//
-// Os rascunhos são independentes
-// dos pedidos efetivamente criados.
-//
-// Nenhum ticket anterior é apagado.
-
 db.exec(`
     CREATE TABLE IF NOT EXISTS
         rascunhos_tickets (
-
             servidor_id TEXT NOT NULL,
-
             cliente_id TEXT NOT NULL,
-
             quantidade_robux INTEGER NOT NULL,
-
             modalidade TEXT,
-
             usuario_roblox TEXT,
-
             atualizado_em INTEGER NOT NULL,
-
             PRIMARY KEY (
                 servidor_id,
                 cliente_id
             )
         );
 `);
-
-// ==========================================
-// ERROS CONTROLADOS
-// ==========================================
-
 class ErroTicket extends Error {
     constructor(mensagem) {
         super(mensagem);
         this.name = 'ErroTicket';
     }
 }
-
-// ==========================================
-// RESPOSTAS PRIVADAS
-// ==========================================
-
 async function responder(
     interaction,
     conteudo
@@ -174,61 +92,36 @@ async function responder(
         typeof conteudo === 'string'
             ? { content: conteudo }
             : conteudo;
-
     const payload = {
         ...dados,
-
         allowedMentions: {
             parse: []
         }
     };
-
     if (interaction.deferred) {
         return interaction.editReply(
             payload
         );
     }
-
     if (interaction.replied) {
         return interaction.followUp({
             ...payload,
-
             flags:
                 MessageFlags.Ephemeral
         });
     }
-
     return interaction.reply({
         ...payload,
-
         flags:
             MessageFlags.Ephemeral
     });
 }
-
-// ==========================================
-// FORMATAR PEDIDO
-// ==========================================
-
 function numeroPedido(ticketId) {
     return (
         'INV-' +
         String(ticketId).padStart(4, '0')
     );
 }
-
-// ==========================================
-// VALIDAR QUANTIDADE DE ROBUX
-// ==========================================
-
-// Aceita:
-//
-// 5000
-// 5k
-// 2.5k
-// 2,5k
-// 5.000
-
 function interpretarQuantidade(valor) {
     const texto = String(
         valor ?? ''
@@ -236,9 +129,7 @@ function interpretarQuantidade(valor) {
         .trim()
         .toLowerCase()
         .replace(/\s/g, '');
-
     let quantidade;
-
     if (
         /^\d+(?:[.,]\d+)?k$/.test(texto)
     ) {
@@ -248,7 +139,6 @@ function interpretarQuantidade(valor) {
                     .slice(0, -1)
                     .replace(',', '.')
             ) * 1000;
-
     } else if (
         /^\d{1,3}(?:\.\d{3})+$/.test(texto)
     ) {
@@ -256,17 +146,14 @@ function interpretarQuantidade(valor) {
             Number(
                 texto.replace(/\./g, '')
             );
-
     } else if (
         /^\d+$/.test(texto)
     ) {
         quantidade =
             Number(texto);
-
     } else {
         return null;
     }
-
     if (
         !Number.isSafeInteger(quantidade) ||
         quantidade < 1 ||
@@ -274,25 +161,8 @@ function interpretarQuantidade(valor) {
     ) {
         return null;
     }
-
     return quantidade;
 }
-
-// ==========================================
-// INTERPRETAR VALOR PAGO
-// ==========================================
-
-// Exclusivo da finalização feita
-// pela equipe.
-//
-// Exemplos:
-//
-// 210
-// 210,50
-// 1.210,50
-//
-// O valor fica armazenado em centavos.
-
 function interpretarValorPago(valor) {
     const texto = String(
         valor ?? ''
@@ -300,9 +170,7 @@ function interpretarValorPago(valor) {
         .replace(/R\$/gi, '')
         .replace(/\s/g, '')
         .trim();
-
     let normalizado;
-
     if (
         /^\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?$/.test(
             texto
@@ -311,57 +179,43 @@ function interpretarValorPago(valor) {
         normalizado = texto
             .replace(/\./g, '')
             .replace(',', '.');
-
     } else if (
         /^\d+(?:,\d{1,2})?$/.test(texto)
     ) {
         normalizado =
             texto.replace(',', '.');
-
     } else if (
         /^\d+\.\d{1,2}$/.test(texto)
     ) {
         normalizado = texto;
-
     } else {
         return null;
     }
-
     const centavos =
         Math.round(
             Number(normalizado) * 100
         );
-
     if (
         !Number.isSafeInteger(centavos) ||
         centavos <= 0
     ) {
         return null;
     }
-
     return centavos;
 }
-
-// ==========================================
-// CONSULTAR RASCUNHO
-// ==========================================
-
 function obterRascunho(interaction) {
     const registro = db.prepare(`
         SELECT *
         FROM rascunhos_tickets
-
         WHERE servidor_id = ?
           AND cliente_id = ?
     `).get(
         interaction.guildId,
         interaction.user.id
     );
-
     if (!registro) {
         return null;
     }
-
     if (
         Date.now() -
         Number(registro.atualizado_em) >
@@ -369,14 +223,8 @@ function obterRascunho(interaction) {
     ) {
         return null;
     }
-
     return registro;
 }
-
-// ==========================================
-// SALVAR RASCUNHO
-// ==========================================
-
 function salvarRascunho(
     interaction,
     quantidade,
@@ -392,9 +240,7 @@ function salvarRascunho(
             usuario_roblox,
             atualizado_em
         )
-
         VALUES (?, ?, ?, ?, ?, ?)
-
         ON CONFLICT(
             servidor_id,
             cliente_id
@@ -402,13 +248,10 @@ function salvarRascunho(
         DO UPDATE SET
             quantidade_robux =
                 excluded.quantidade_robux,
-
             modalidade =
                 excluded.modalidade,
-
             usuario_roblox =
                 excluded.usuario_roblox,
-
             atualizado_em =
                 excluded.atualizado_em
     `).run(
@@ -420,15 +263,9 @@ function salvarRascunho(
         Date.now()
     );
 }
-
-// ==========================================
-// APAGAR RASCUNHO CONCLUÍDO
-// ==========================================
-
 function limparRascunho(interaction) {
     db.prepare(`
         DELETE FROM rascunhos_tickets
-
         WHERE servidor_id = ?
           AND cliente_id = ?
     `).run(
@@ -436,11 +273,6 @@ function limparRascunho(interaction) {
         interaction.user.id
     );
 }
-
-// ==========================================
-// VALIDAR MODALIDADE
-// ==========================================
-
 function metodoLiberado(
     config,
     metodo
@@ -448,17 +280,11 @@ function metodoLiberado(
     if (!METODOS[metodo]) {
         return false;
     }
-
     if (
         config.tickets?.bloqueados?.[metodo]
     ) {
         return false;
     }
-
-    // A modalidade Via Grupo
-    // permanece desativada por padrão
-    // até ser liberada explicitamente.
-
     if (
         metodo === 'viaGrupo' &&
         config.tickets?.bloqueados?.viaGrupo
@@ -466,22 +292,15 @@ function metodoLiberado(
     ) {
         return false;
     }
-
     const precoK =
         Number(
             config.calculadora?.[metodo]
         );
-
     return (
         Number.isFinite(precoK) &&
         precoK > 0
     );
 }
-
-// ==========================================
-// CALCULAR PEDIDO
-// ==========================================
-
 function calcularPedido(
     config,
     metodo,
@@ -492,32 +311,25 @@ function calcularPedido(
             'Essa modalidade está indisponível.'
         );
     }
-
     const k =
         Number(
             config.calculadora[metodo]
         );
-
     let preco;
     let recebido = quantidade;
     let gamepass = null;
-
     if (metodo === 'semTaxa') {
         const resultado =
             calcularSemTaxa(
                 quantidade,
                 k
             );
-
         preco =
             resultado.preco;
-
         recebido =
             resultado.robuxRecebido;
-
         gamepass =
             resultado.robuxGamepass;
-
     } else if (
         metodo === 'taxado'
     ) {
@@ -526,16 +338,12 @@ function calcularPedido(
                 quantidade,
                 k
             );
-
         preco =
             resultado.preco;
-
         recebido =
             resultado.robuxRecebido;
-
         gamepass =
             resultado.robuxGamepass;
-
     } else {
         preco =
             calcularPreco(
@@ -543,10 +351,8 @@ function calcularPedido(
                 k
             );
     }
-
     const centavos =
         Math.round(preco * 100);
-
     if (
         !Number.isSafeInteger(centavos) ||
         centavos <= 0
@@ -556,33 +362,17 @@ function calcularPedido(
             'a configuração da calculadora.'
         );
     }
-
     return {
         centavos,
         recebido,
         gamepass
     };
 }
-
-// ==========================================
-// CALCULAR ROBUX DE TICKET EXISTENTE
-// ==========================================
-
-// Aqui usamos apenas os dados
-// já armazenados no ticket.
-//
-// O preço K pode mudar depois
-// que o pedido foi criado.
-//
-// Não recalculamos o preço pago
-// nem alteramos o pedido anterior.
-
 function obterRobuxTicket(ticket) {
     const quantidade =
         Number(
             ticket.quantidade_robux
         );
-
     if (
         ticket.modalidade === 'semTaxa'
     ) {
@@ -591,39 +381,29 @@ function obterRobuxTicket(ticket) {
                 Math.floor(
                     quantidade * 0.7
                 ),
-
             gamepass:
                 quantidade
         };
     }
-
     if (
         ticket.modalidade === 'taxado'
     ) {
         return {
             recebido:
                 quantidade,
-
             gamepass:
                 Math.ceil(
                     quantidade * 10 / 7
                 )
         };
     }
-
     return {
         recebido:
             quantidade,
-
         gamepass:
             null
     };
 }
-
-// ==========================================
-// VERIFICAR ATENDENTE
-// ==========================================
-
 function podeAtender(
     interaction,
     config
@@ -635,18 +415,14 @@ function podeAtender(
     ) {
         return true;
     }
-
     const cargoId =
         config.tickets?.cargoEquipeId ||
         config.staff?.cargoId;
-
     if (!cargoId) {
         return false;
     }
-
     const cargos =
         interaction.member?.roles;
-
     return Boolean(
         cargos?.cache?.has?.(
             cargoId
@@ -657,11 +433,6 @@ function podeAtender(
         )
     );
 }
-
-// ==========================================
-// CRIAR MODAL
-// ==========================================
-
 function montarModal(
     id,
     titulo,
@@ -671,7 +442,6 @@ function montarModal(
         new ModalBuilder()
             .setCustomId(id)
             .setTitle(titulo);
-
     for (const campo of campos) {
         const input =
             new TextInputBuilder()
@@ -690,13 +460,11 @@ function montarModal(
                 .setMaxLength(
                     campo.max || 80
                 );
-
         if (campo.placeholder) {
             input.setPlaceholder(
                 campo.placeholder
             );
         }
-
         if (
             campo.valor !== null &&
             campo.valor !== undefined
@@ -705,20 +473,13 @@ function montarModal(
                 String(campo.valor)
             );
         }
-
         modal.addComponents(
             new ActionRowBuilder()
                 .addComponents(input)
         );
     }
-
     return modal;
 }
-
-// ==========================================
-// BOTÕES DAS MODALIDADES
-// ==========================================
-
 function linhaMetodos(config) {
     const botoes =
         Object.entries(METODOS).map(
@@ -728,7 +489,6 @@ function linhaMetodos(config) {
                         config,
                         metodo
                     );
-
                 return new ButtonBuilder()
                     .setCustomId(
                         `ticket_metodo_${metodo}`
@@ -742,169 +502,9 @@ function linhaMetodos(config) {
                     .setDisabled(!ativo);
             }
         );
-
     return new ActionRowBuilder()
         .addComponents(botoes);
 }
-
-// ==========================================
-// PAINEL PRIVADO DO TICKET
-// ==========================================
-
-// NÃO exibir reais neste painel.
-//
-// Exibimos:
-//
-// - Quantidade solicitada
-// - Modalidade
-// - Discord do cliente
-// - Username Roblox
-// - Método de pagamento
-// - Quantidade a receber
-// - Gamepass, se necessária
-// - Estado do atendimento
-
-function painelTicket(
-    ticket,
-    usuario,
-    quote
-) {
-    const identificador =
-        numeroPedido(ticket.id);
-
-    const modalidade =
-        METODOS[ticket.modalidade] ||
-        'Não informada';
-
-    const pagamento =
-        PAGAMENTOS[ticket.pagamento] ||
-        'Não informado';
-
-    const username =
-        String(
-            usuario || 'Não informado'
-        )
-            .replace(/[`<>\r\n]/g, '')
-            .slice(0, 30);
-
-    const linhas = [
-        `👤 **Discord:** <@${ticket.cliente_id}>`,
-
-        `🎮 **Roblox:** \`${username}\``,
-
-        `💎 **Quantidade solicitada:** ${
-            formatarRobux(
-                ticket.quantidade_robux
-            )
-        } Robux`,
-
-        `📦 **Modalidade:** ${modalidade}`,
-
-        `💳 **Pagamento:** ${pagamento}`,
-
-        `✅ **Robux a receber:** ${
-            formatarRobux(
-                quote.recebido
-            )
-        }`
-    ];
-
-    if (
-        quote.gamepass !== null &&
-        quote.gamepass !== undefined
-    ) {
-        linhas.push(
-            `🎟️ **Gamepass necessária:** ${
-                formatarRobux(
-                    quote.gamepass
-                )
-            }`
-        );
-    }
-
-    linhas.push(
-        '',
-        '⏳ **Aguardando atendimento da equipe.**',
-        '',
-        '⚠️ Nunca envie sua senha ou ' +
-        'códigos de verificação.',
-        'Aguarde a equipe orientar ' +
-        'o pagamento e a entrega.'
-    );
-
-    const embed =
-        new EmbedBuilder()
-            .setColor(COR)
-            .setTitle(
-                `🛒 Pedido ${identificador}`
-            )
-            .setDescription(
-                linhas.join('\n')
-            )
-            .setFooter({
-                text:
-                    'InovareSale • Atendimento'
-            });
-
-    const botoes =
-        new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId(
-                        'ticket_assumir'
-                    )
-                    .setLabel(
-                        'Assumir atendimento'
-                    )
-                    .setStyle(
-                        ButtonStyle.Primary
-                    ),
-
-                new ButtonBuilder()
-                    .setCustomId(
-                        'ticket_finalizar'
-                    )
-                    .setLabel(
-                        'Finalizar venda'
-                    )
-                    .setStyle(
-                        ButtonStyle.Success
-                    ),
-
-                new ButtonBuilder()
-                    .setCustomId(
-                        'ticket_cancelar'
-                    )
-                    .setLabel(
-                        'Cancelar'
-                    )
-                    .setStyle(
-                        ButtonStyle.Danger
-                    )
-            );
-
-    return {
-        embeds: [embed],
-
-        components: [botoes],
-
-        allowedMentions: {
-            parse: []
-        }
-    };
-}
-
-// ==========================================
-// REGISTRAR LOG NO SISTEMA 3.0
-// ==========================================
-
-// O log do sistema é independente
-// do log interno da tabela
-// logs_tickets.
-//
-// Se o canal estiver indisponível,
-// a ação do ticket não será desfeita.
-
 async function registrarLogTicket({
     guild,
     ticket,
@@ -917,27 +517,19 @@ async function registrarLogTicket({
     try {
         await registrarLogSistema({
             guild,
-
             tipo:
                 TIPOS_LOG?.[tipo] ||
                 tipo.toLowerCase(),
-
             titulo,
-
             detalhes,
-
             autorId,
-
             alvoId:
                 ticket.cliente_id,
-
             referencia:
                 numeroPedido(ticket.id),
-
             chaveEvento:
                 `ticket_${ticket.id}_${chave}`
         });
-
     } catch (erro) {
         console.error(
             '[InovareSale | Ticket] ' +
@@ -946,11 +538,6 @@ async function registrarLogTicket({
         );
     }
 }
-
-// ==========================================
-// VALIDAR CATEGORIA E CARGO
-// ==========================================
-
 async function obterDestinoTicket(
     guild,
     metodo,
@@ -958,10 +545,8 @@ async function obterDestinoTicket(
 ) {
     const categoriaId =
         config.tickets?.categorias?.[metodo];
-
     const equipeId =
         config.tickets?.cargoEquipeId;
-
     if (
         !categoriaId ||
         !equipeId
@@ -971,7 +556,6 @@ async function obterDestinoTicket(
             'da equipe no /setup.'
         );
     }
-
     const [
         categoria,
         equipe
@@ -979,12 +563,10 @@ async function obterDestinoTicket(
         guild.channels.fetch(
             categoriaId
         ),
-
         guild.roles.fetch(
             equipeId
         )
     ]);
-
     if (
         categoria?.type !==
         ChannelType.GuildCategory
@@ -994,55 +576,27 @@ async function obterDestinoTicket(
             'não é válida.'
         );
     }
-
     if (!equipe) {
         throw new ErroTicket(
             'O cargo de atendimento ' +
             'não foi encontrado.'
         );
     }
-
     return {
         categoriaId,
         equipeId
     };
 }
-
-// ==========================================
-// CRIAR TICKET
-// ==========================================
-
-// Etapas:
-//
-// 1. Validar modalidade e destino.
-// 2. Registrar ticket em "criando".
-// 3. Criar canal privado no Discord.
-// 4. Vincular o canal ao SQLite.
-// 5. Publicar painel do pedido.
-// 6. Apagar rascunho concluído.
-// 7. Registrar log.
-//
-// Se o Discord falhar antes de
-// criar o canal, cancelamos somente
-// o registro em criação.
-//
-// Se o canal já existir e algo
-// falhar depois, ele é preservado
-// para recuperação pela equipe.
-
 async function criarTicket(
     interaction,
     rascunho
 ) {
     const guild =
         interaction.guild;
-
     const config =
         getConfig();
-
     const metodo =
         rascunho.modalidade;
-
     if (
         !metodoLiberado(
             config,
@@ -1053,67 +607,45 @@ async function criarTicket(
             'Essa modalidade está indisponível.'
         );
     }
-
     const destino =
         await obterDestinoTicket(
             guild,
             metodo,
             config
         );
-
     const quote =
         calcularPedido(
             config,
             metodo,
             rascunho.quantidade_robux
         );
-
-    // ======================================
-    // CRIAR REGISTRO NO SQLITE
-    // ======================================
-
     const ticket =
         criarRegistroTicket({
             servidorId:
                 guild.id,
-
             clienteId:
                 interaction.user.id,
-
             modalidade:
                 metodo,
-
             quantidadeRobux:
                 rascunho.quantidade_robux,
-
             precoCentavos:
                 quote.centavos,
-
             usuarioRoblox:
                 rascunho.usuario_roblox,
-
             pagamento:
                 rascunho.pagamento
         });
-
     let canal = null;
-
     try {
-        // ==================================
-        // CRIAR CANAL PRIVADO
-        // ==================================
-
         canal =
             await guild.channels.create({
                 name:
                     `${rascunho.quantidade_robux}x-robux`,
-
                 type:
                     ChannelType.GuildText,
-
                 parent:
                     destino.categoriaId,
-
                 topic:
                     `Pedido ${
                         numeroPedido(
@@ -1122,21 +654,17 @@ async function criarTicket(
                     } | Cliente ${
                         interaction.user.id
                     }`,
-
                 permissionOverwrites: [
                     {
                         id:
                             guild.roles.everyone.id,
-
                         deny: [
                             PermissionFlagsBits.ViewChannel
                         ]
                     },
-
                     {
                         id:
                             interaction.user.id,
-
                         allow: [
                             PermissionFlagsBits.ViewChannel,
                             PermissionFlagsBits.SendMessages,
@@ -1144,22 +672,18 @@ async function criarTicket(
                             PermissionFlagsBits.AttachFiles
                         ]
                     },
-
                     {
                         id:
                             destino.equipeId,
-
                         allow: [
                             PermissionFlagsBits.ViewChannel,
                             PermissionFlagsBits.SendMessages,
                             PermissionFlagsBits.ReadMessageHistory
                         ]
                     },
-
                     {
                         id:
                             interaction.client.user.id,
-
                         allow: [
                             PermissionFlagsBits.ViewChannel,
                             PermissionFlagsBits.SendMessages,
@@ -1170,72 +694,30 @@ async function criarTicket(
                     }
                 ]
             });
-
-        // ==================================
-        // VINCULAR AO BANCO
-        // ==================================
-
         const vinculado =
             vincularCanalTicket(
                 ticket.id,
                 canal.id
             );
-
-        // ==================================
-        // ENVIAR PAINEL
-        // ==================================
-
-        await canal.send(
-            painelTicket(
-                vinculado,
-                rascunho.usuario_roblox,
-                quote
-            )
+        const perfilRoblox = await consultarPerfilRoblox(
+            rascunho.usuario_roblox
         );
-
-        // ==================================
-        // AVISO DO PAGAMENTO MM
-        // ==================================
-
-        if (
-            rascunho.pagamento === 'mm'
-        ) {
-            await canal.send({
-                content:
-                    '🤝 **Solicitação de MM**\n' +
-                    'Aguarde a equipe organizar ' +
-                    'a intermediação.\n' +
-                    'Não faça pagamentos antecipados.',
-
-                allowedMentions: {
-                    parse: []
-                }
-            });
-        }
-
-        // ==================================
-        // APAGAR RASCUNHO
-        // ==================================
-
+        await canal.send(criarPainelPerfilRoblox(perfilRoblox));
+        await canal.send(criarPainelTicket(
+            vinculado,
+            rascunho.usuario_roblox,
+            quote
+        ));
         limparRascunho(
             interaction
         );
-
-        // ==================================
-        // REGISTRAR LOG
-        // ==================================
-
         await registrarLogTicket({
             guild,
-
             ticket: vinculado,
-
             tipo:
                 'TICKET_CRIADO',
-
             titulo:
                 'Novo ticket de compra',
-
             detalhes:
                 `Pedido: ${
                     numeroPedido(ticket.id)
@@ -1249,28 +731,19 @@ async function criarTicket(
                         ticket.quantidade_robux
                     )
                 } Robux`,
-
             autorId:
                 interaction.user.id,
-
             chave:
                 'criado'
         });
-
         return canal;
-
     } catch (erro) {
-        // ==================================
-        // PRESERVAR DADOS PARA RECUPERAÇÃO
-        // ==================================
-
         if (!canal) {
             try {
                 descartarTicketEmCriacao(
                     ticket.id,
                     'Falha ao criar o canal'
                 );
-
             } catch (erroBanco) {
                 console.error(
                     '[InovareSale | Ticket] ' +
@@ -1278,7 +751,6 @@ async function criarTicket(
                     erroBanco
                 );
             }
-
         } else {
             console.error(
                 '[InovareSale | Ticket] ' +
@@ -1291,15 +763,9 @@ async function criarTicket(
                 }
             );
         }
-
         throw erro;
     }
 }
-
-// ==========================================
-// CONSULTAR TICKET DO CANAL
-// ==========================================
-
 function ticketDesteCanal(
     interaction
 ) {
@@ -1307,32 +773,21 @@ function ticketDesteCanal(
         interaction.channelId
     );
 }
-
-// ==========================================
-// FECHAR CANAL APÓS O ATENDIMENTO
-// ==========================================
-
 function fecharCanal(
     canal
 ) {
     if (!canal?.id) {
         return;
     }
-
     const timer = setTimeout(
         async () => {
             try {
-                // Não apagar um canal sem
-                // confirmar o ticket
-                // vinculado ao mesmo.
-
                 const ticket =
                     db.prepare(`
                         SELECT *
                         FROM tickets
                         WHERE canal_id = ?
                     `).get(canal.id);
-
                 if (
                     !ticket ||
                     ![
@@ -1344,7 +799,6 @@ function fecharCanal(
                 ) {
                     return;
                 }
-
                 if (
                     canal.deletable
                 ) {
@@ -1352,7 +806,6 @@ function fecharCanal(
                         'Pedido encerrado pela InovareSale'
                     );
                 }
-
             } catch (erro) {
                 console.error(
                     '[InovareSale | Ticket] ' +
@@ -1363,21 +816,8 @@ function fecharCanal(
         },
         TEMPO_FECHAMENTO
     );
-
     timer.unref?.();
 }
-
-// ==========================================
-// CONSULTAR VENDA DE UM TICKET
-// ==========================================
-
-// A tabela vendas_tickets possui
-// uma relação única com ticket_id.
-//
-// Se existe uma venda salva,
-// jamais tratamos esse ticket
-// como uma venda não realizada.
-
 function buscarVendaTicket(
     ticketId
 ) {
@@ -1388,24 +828,6 @@ function buscarVendaTicket(
         LIMIT 1
     `).get(ticketId) || null;
 }
-
-// ==========================================
-// REGISTRAR VENDA DO TICKET
-// ==========================================
-
-// Primeiro garantir o estado
-// "finalizando".
-//
-// O vendaService.js já protege
-// contra histórico duplicado.
-//
-// Depois, confirmar o encerramento
-// do ticket no SQLite.
-//
-// Se houver falha após a venda
-// ter sido salva, NÃO voltamos
-// o ticket para "aberto".
-
 async function finalizarVendaTicket(
     interaction,
     ticket,
@@ -1416,83 +838,53 @@ async function finalizarVendaTicket(
             ticket.id,
             interaction.user.id
         );
-
     if (!iniciou) {
         throw new ErroTicket(
             'O pedido já está sendo finalizado ' +
             'ou não está mais aberto.'
         );
     }
-
-    // ======================================
-    // REGISTRAR VENDA
-    // ======================================
-
     let resultadoVenda = null;
-
     try {
         const robux =
             obterRobuxTicket(
                 ticket
             ).recebido;
-
         resultadoVenda =
             await registrarVenda({
                 guild:
                     interaction.guild,
-
                 clienteId:
                     ticket.cliente_id,
-
                 valor:
                     centavos / 100,
-
                 robux,
-
                 registradoPorId:
                     interaction.user.id,
-
                 modalidade:
                     ticket.modalidade,
-
                 usuarioRoblox:
                     ticket.usuario_roblox,
-
                 pagamento:
                     ticket.pagamento,
-
                 origem:
                     'ticket',
-
                 ticketId:
                     ticket.id
             });
-
     } catch (erro) {
-        // ==================================
-        // VERIFICAR SE A VENDA FOI SALVA
-        // ==================================
-
         let vendaRegistrada;
-
         try {
             vendaRegistrada =
                 buscarVendaTicket(
                     ticket.id
                 );
-
         } catch (erroConsulta) {
-            // Se não conseguimos consultar
-            // o banco, o estado é incerto.
-            //
-            // Não fazemos reversão.
-
             console.error(
                 '[InovareSale | Ticket] ' +
                 'Falha ao verificar venda:',
                 erroConsulta
             );
-
             throw new ErroTicket(
                 'Não foi possível confirmar o ' +
                 'registro da venda. O pedido ' +
@@ -1500,27 +892,19 @@ async function finalizarVendaTicket(
                 'verificação da administração.'
             );
         }
-
         if (vendaRegistrada) {
-            // A venda existe.
-            //
-            // Não reverter o estado
-            // e não registrar outra venda.
-
             try {
                 confirmarFinalizacao(
                     ticket.id,
                     interaction.user.id,
                     vendaRegistrada.valor_centavos
                 );
-
             } catch (erroConfirmacao) {
                 console.error(
                     '[InovareSale | Ticket] ' +
                     'Venda salva, mas falhou a confirmação:',
                     erroConfirmacao
                 );
-
                 throw new ErroTicket(
                     'A venda já está salva no SQLite, ' +
                     'mas o encerramento do ticket ' +
@@ -1528,27 +912,19 @@ async function finalizarVendaTicket(
                     'Não registre a venda novamente.'
                 );
             }
-
             return {
                 recuperada: true,
                 resultadoVenda: null
             };
         }
-
-        // ==================================
-        // NENHUMA VENDA FOI SALVA
-        // ==================================
-
         reverterFinalizacao(
             ticket.id
         );
-
         console.error(
             '[InovareSale | Ticket] ' +
             'Falha antes do registro da venda:',
             erro
         );
-
         throw new ErroTicket(
             'A venda não foi registrada. ' +
             'O pedido voltou para aberto. ' +
@@ -1556,31 +932,18 @@ async function finalizarVendaTicket(
             'de tentar novamente.'
         );
     }
-
-    // ======================================
-    // CONFIRMAR TICKET FINALIZADO
-    // ======================================
-
-    // Neste ponto, registrarVenda()
-    // concluiu a operação.
-    //
-    // Nunca revertemos o ticket
-    // por uma falha posterior.
-
     try {
         confirmarFinalizacao(
             ticket.id,
             interaction.user.id,
             centavos
         );
-
     } catch (erro) {
         console.error(
             '[InovareSale | Ticket] ' +
             'Venda salva, mas ticket não finalizado:',
             erro
         );
-
         throw new ErroTicket(
             'A venda foi salva no SQLite, mas ' +
             'o status do ticket precisa de ' +
@@ -1588,23 +951,11 @@ async function finalizarVendaTicket(
             'Não finalize uma segunda vez.'
         );
     }
-
     return {
         recuperada: false,
         resultadoVenda
     };
 }
-
-// ==========================================
-// PÓS-FINALIZAÇÃO
-// ==========================================
-
-// Só executar após o status do
-// ticket estar "finalizado".
-//
-// Falhas em mensagens, avaliação
-// ou logs não desfazem a venda.
-
 async function aposFinalizar(
     interaction,
     ticket
@@ -1613,30 +964,20 @@ async function aposFinalizar(
         buscarTicket(
             ticket.id
         );
-
     if (
         finalizado?.status !== 'finalizado'
     ) {
         return;
     }
-
-    // ======================================
-    // LOG DE VENDA
-    // ======================================
-
     await registrarLogTicket({
         guild:
             interaction.guild,
-
         ticket:
             finalizado,
-
         tipo:
             'VENDA_FINALIZADA',
-
         titulo:
             'Venda de ticket finalizada',
-
         detalhes:
             `Pedido: ${
                 numeroPedido(finalizado.id)
@@ -1650,23 +991,15 @@ async function aposFinalizar(
                     finalizado.quantidade_robux
                 )
             } Robux`,
-
         autorId:
             interaction.user.id,
-
         chave:
             'venda_finalizada'
     });
-
-    // ======================================
-    // AVISO NO CANAL PRIVADO
-    // ======================================
-
     await interaction.channel.send({
         content:
             '✅ **Compra concluída!**\n' +
             'Obrigado por comprar na InovareSale! 💜',
-
         allowedMentions: {
             parse: []
         }
@@ -1677,21 +1010,14 @@ async function aposFinalizar(
             erro.message
         );
     });
-
-    // ======================================
-    // SOLICITAR AVALIAÇÃO
-    // ======================================
-
     try {
         const {
             solicitarAvaliacao
         } = require('./avaliacaoHandler');
-
         await solicitarAvaliacao(
             interaction.client,
             finalizado
         );
-
     } catch (erro) {
         console.warn(
             '[InovareSale | Ticket] ' +
@@ -1699,20 +1025,10 @@ async function aposFinalizar(
             erro.message
         );
     }
-
-    // ======================================
-    // FECHAR CANAL
-    // ======================================
-
     fecharCanal(
         interaction.channel
     );
 }
-
-// ==========================================
-// BOTÃO ASSUMIR ATENDIMENTO
-// ==========================================
-
 async function executarAssumir(
     interaction,
     ticket
@@ -1722,55 +1038,40 @@ async function executarAssumir(
             ticket.id,
             interaction.user.id
         );
-
     await responder(
         interaction,
         `✅ Atendimento do pedido ${
             numeroPedido(ticket.id)
         } assumido.`
     );
-
     await interaction.channel.send({
         content:
             `🎧 Atendimento assumido por ` +
             `<@${interaction.user.id}>.`,
-
         allowedMentions: {
             parse: []
         }
     }).catch(() => {});
-
     await registrarLogTicket({
         guild:
             interaction.guild,
-
         ticket:
             atualizado,
-
         tipo:
             'TICKET_ASSUMIDO',
-
         titulo:
             'Atendimento assumido',
-
         detalhes:
             `Pedido: ${
                 numeroPedido(ticket.id)
             }\n` +
             `Funcionário: <@${interaction.user.id}>`,
-
         autorId:
             interaction.user.id,
-
         chave:
             `assumido_${interaction.user.id}`
     });
 }
-
-// ==========================================
-// BOTÃO CANCELAR
-// ==========================================
-
 async function executarCancelar(
     interaction,
     ticket
@@ -1780,59 +1081,43 @@ async function executarCancelar(
             ticket.id,
             interaction.user.id
         );
-
     await responder(
         interaction,
         '❌ Pedido cancelado. ' +
         'Nenhuma venda será criada pelo cancelamento.'
     );
-
     await registrarLogTicket({
         guild:
             interaction.guild,
-
         ticket:
             cancelado,
-
         tipo:
             'TICKET_CANCELADO',
-
         titulo:
             'Ticket cancelado',
-
         detalhes:
             `Pedido: ${
                 numeroPedido(ticket.id)
             }\n` +
             `Cliente: <@${ticket.cliente_id}>\n` +
             `Cancelado por: <@${interaction.user.id}>`,
-
         autorId:
             interaction.user.id,
-
         chave:
             'cancelado'
     });
-
     await interaction.channel.send({
         content:
             '❌ **Pedido cancelado.**\n' +
             'Este canal será fechado em alguns segundos.',
-
         allowedMentions: {
             parse: []
         }
     }).catch(() => {});
-
     fecharCanal(
         interaction.channel
     );
 }
-
-// ==========================================
-// BOTÃO FINALIZAR
-// ==========================================
-
 async function abrirModalFinalizacao(
     interaction,
     ticket
@@ -1845,38 +1130,26 @@ async function abrirModalFinalizacao(
         )
             .toFixed(2)
             .replace('.', ',');
-
     await interaction.showModal(
         montarModal(
             `ticket_concluir_${ticket.id}`,
-
             'Finalizar venda',
-
             [
                 {
                     id:
                         'valor_pago',
-
                     label:
                         'Valor realmente pago (R$)',
-
                     valor:
                         precoSugerido,
-
                     placeholder:
                         'Exemplo: 210,00',
-
                     max: 30
                 }
             ]
         )
     );
 }
-
-// ==========================================
-// PROCESSAR MODAL DE FINALIZAÇÃO
-// ==========================================
-
 async function concluirPedido(
     interaction,
     ticketId
@@ -1885,7 +1158,6 @@ async function concluirPedido(
         ticketDesteCanal(
             interaction
         );
-
     if (
         !ticket ||
         ticket.id !== ticketId
@@ -1895,7 +1167,6 @@ async function concluirPedido(
             'ao ticket atual.'
         );
     }
-
     if (
         !podeAtender(
             interaction,
@@ -1907,35 +1178,26 @@ async function concluirPedido(
             'finalizar pedidos.'
         );
     }
-
     const centavos =
         interpretarValorPago(
             interaction.fields.getTextInputValue(
                 'valor_pago'
             )
         );
-
     if (!centavos) {
         throw new ErroTicket(
             'Informe um valor válido, ' +
             'como 210,00.'
         );
     }
-
     await interaction.deferReply({
         flags:
             MessageFlags.Ephemeral
     });
-
-    // ======================================
-    // VERIFICAR ESTADO ATUAL
-    // ======================================
-
     const atual =
         buscarTicket(
             ticket.id
         );
-
     if (
         atual.status === 'finalizado'
     ) {
@@ -1943,10 +1205,8 @@ async function concluirPedido(
             interaction,
             '✅ Este pedido já foi finalizado.'
         );
-
         return;
     }
-
     if (
         atual.status === 'cancelado'
     ) {
@@ -1955,20 +1215,13 @@ async function concluirPedido(
             'e não pode ser finalizado.'
         );
     }
-
     if (
         atual.status === 'finalizando'
     ) {
-        // Há possibilidade de uma
-        // finalização anterior ter
-        // salvo a venda e não ter
-        // concluído o ticket.
-
         const venda =
             buscarVendaTicket(
                 ticket.id
             );
-
         if (venda) {
             throw new ErroTicket(
                 'A venda já está registrada, ' +
@@ -1977,24 +1230,17 @@ async function concluirPedido(
                 'outra venda.'
             );
         }
-
         throw new ErroTicket(
             'O ticket já está em finalização. ' +
             'Aguarde ou solicite uma verificação.'
         );
     }
-
-    // ======================================
-    // FINALIZAR SEM DUPLICAÇÃO
-    // ======================================
-
     const resultado =
         await finalizarVendaTicket(
             interaction,
             atual,
             centavos
         );
-
     await responder(
         interaction,
         resultado.recuperada
@@ -2002,44 +1248,27 @@ async function concluirPedido(
               'recuperada e o ticket finalizado.'
             : '✅ Venda registrada e ticket finalizado!'
     );
-
-    // ======================================
-    // PÓS-VENDA INDEPENDENTE
-    // ======================================
-
     try {
         await aposFinalizar(
             interaction,
             atual
         );
-
     } catch (erro) {
-        // Nunca reverter uma venda
-        // já confirmada por causa
-        // de mensagens ou avaliações.
-
         console.error(
             '[InovareSale | Ticket] ' +
             'Falha após finalizar venda:',
             erro
         );
-
         fecharCanal(
             interaction.channel
         );
     }
 }
-
-// ==========================================
-// HANDLER PRINCIPAL
-// ==========================================
-
 async function handleTicketInteraction(
     interaction
 ) {
     const id =
         interaction.customId || '';
-
     if (
         !id.startsWith(
             'ticket_'
@@ -2047,7 +1276,6 @@ async function handleTicketInteraction(
     ) {
         return false;
     }
-
     if (
         !interaction.inGuild()
     ) {
@@ -2055,15 +1283,9 @@ async function handleTicketInteraction(
             interaction,
             '❌ Abra os pedidos dentro do servidor.'
         );
-
         return true;
     }
-
     try {
-        // ==================================
-        // ABRIR COMPRA
-        // ==================================
-
         if (
             interaction.isButton() &&
             id === 'ticket_abrir'
@@ -2071,33 +1293,22 @@ async function handleTicketInteraction(
             await interaction.showModal(
                 montarModal(
                     'ticket_quantidade',
-
                     'Comprar Robux',
-
                     [
                         {
                             id:
                                 'quantidade',
-
                             label:
                                 'Quantos Robux deseja comprar?',
-
                             placeholder:
                                 'Exemplo: 5000 ou 5k',
-
                             max: 30
                         }
                     ]
                 )
             );
-
             return true;
         }
-
-        // ==================================
-        // RECEBER QUANTIDADE
-        // ==================================
-
         if (
             interaction.isModalSubmit() &&
             id === 'ticket_quantidade'
@@ -2108,19 +1319,16 @@ async function handleTicketInteraction(
                         'quantidade'
                     )
                 );
-
             if (!quantidade) {
                 throw new ErroTicket(
                     'Quantidade inválida. ' +
                     'Use 5000 ou 5k.'
                 );
             }
-
             salvarRascunho(
                 interaction,
                 quantidade
             );
-
             await responder(
                 interaction,
                 {
@@ -2131,7 +1339,6 @@ async function handleTicketInteraction(
                             )
                         } Robux**\n` +
                         'Escolha a modalidade desejada:',
-
                     components: [
                         linhaMetodos(
                             getConfig()
@@ -2139,14 +1346,8 @@ async function handleTicketInteraction(
                     ]
                 }
             );
-
             return true;
         }
-
-        // ==================================
-        // SELECIONAR MODALIDADE
-        // ==================================
-
         if (
             interaction.isButton() &&
             id.startsWith(
@@ -2157,19 +1358,16 @@ async function handleTicketInteraction(
                 id.slice(
                     'ticket_metodo_'.length
                 );
-
             const rascunho =
                 obterRascunho(
                     interaction
                 );
-
             if (!rascunho) {
                 throw new ErroTicket(
                     'Sua solicitação expirou. ' +
                     'Clique em Comprar novamente.'
                 );
             }
-
             if (
                 !metodoLiberado(
                     getConfig(),
@@ -2180,43 +1378,30 @@ async function handleTicketInteraction(
                     'Essa modalidade está bloqueada.'
                 );
             }
-
             salvarRascunho(
                 interaction,
                 rascunho.quantidade_robux,
                 metodo
             );
-
             await interaction.showModal(
                 montarModal(
                     'ticket_usuario',
-
                     'Usuário do Roblox',
-
                     [
                         {
                             id:
                                 'usuario',
-
                             label:
                                 'Seu username do Roblox',
-
                             placeholder:
                                 'Nunca informe sua senha',
-
                             max: 20
                         }
                     ]
                 )
             );
-
             return true;
         }
-
-        // ==================================
-        // RECEBER USERNAME ROBLOX
-        // ==================================
-
         if (
             interaction.isModalSubmit() &&
             id === 'ticket_usuario'
@@ -2225,7 +1410,6 @@ async function handleTicketInteraction(
                 obterRascunho(
                     interaction
                 );
-
             if (
                 !rascunho?.modalidade
             ) {
@@ -2233,12 +1417,10 @@ async function handleTicketInteraction(
                     'Pedido expirado. Comece novamente.'
                 );
             }
-
             const usuario =
                 interaction.fields.getTextInputValue(
                     'usuario'
                 ).trim();
-
             if (
                 !/^[A-Za-z0-9_]{3,20}$/.test(
                     usuario
@@ -2249,21 +1431,18 @@ async function handleTicketInteraction(
                     'de 3 a 20 caracteres.'
                 );
             }
-
             salvarRascunho(
                 interaction,
                 rascunho.quantidade_robux,
                 rascunho.modalidade,
                 usuario
             );
-
             const quote =
                 calcularPedido(
                     getConfig(),
                     rascunho.modalidade,
                     rascunho.quantidade_robux
                 );
-
             const botoes =
                 new ActionRowBuilder()
                     .addComponents(
@@ -2275,7 +1454,6 @@ async function handleTicketInteraction(
                             .setStyle(
                                 ButtonStyle.Success
                             ),
-
                         new ButtonBuilder()
                             .setCustomId(
                                 'ticket_pagamento_mm'
@@ -2285,7 +1463,6 @@ async function handleTicketInteraction(
                                 ButtonStyle.Secondary
                             )
                     );
-
             await responder(
                 interaction,
                 {
@@ -2307,20 +1484,13 @@ async function handleTicketInteraction(
                         }\n\n` +
                         'Escolha como deseja pagar ' +
                         'para abrir seu ticket:',
-
                     components: [
                         botoes
                     ]
                 }
             );
-
             return true;
         }
-
-        // ==================================
-        // ESCOLHER PAGAMENTO
-        // ==================================
-
         if (
             interaction.isButton() &&
             /^ticket_pagamento_(pix|mm)$/.test(
@@ -2331,12 +1501,10 @@ async function handleTicketInteraction(
                 flags:
                     MessageFlags.Ephemeral
             });
-
             const rascunho =
                 obterRascunho(
                     interaction
                 );
-
             if (
                 !rascunho?.modalidade ||
                 !rascunho?.usuario_roblox
@@ -2346,11 +1514,9 @@ async function handleTicketInteraction(
                     'Comece novamente.'
                 );
             }
-
             const chave =
                 `${interaction.guildId}:` +
                 interaction.user.id;
-
             if (
                 TICKETS_EM_CRIACAO.has(
                     chave
@@ -2361,47 +1527,35 @@ async function handleTicketInteraction(
                     '⏳ Seu ticket já está ' +
                     'sendo criado. Aguarde.'
                 );
-
                 return true;
             }
-
             TICKETS_EM_CRIACAO.add(
                 chave
             );
-
             try {
                 const canal =
                     await criarTicket(
                         interaction,
                         {
                             ...rascunho,
-
                             pagamento:
                                 id.endsWith('_pix')
                                     ? 'pix'
                                     : 'mm'
                         }
                     );
-
                 await responder(
                     interaction,
                     `✅ Seu ticket foi criado: ` +
                     `<#${canal.id}>`
                 );
-
             } finally {
                 TICKETS_EM_CRIACAO.delete(
                     chave
                 );
             }
-
             return true;
         }
-
-        // ==================================
-        // BOTÕES DE ATENDIMENTO
-        // ==================================
-
         if (
             interaction.isButton() &&
             [
@@ -2414,14 +1568,12 @@ async function handleTicketInteraction(
                 ticketDesteCanal(
                     interaction
                 );
-
             if (!ticket) {
                 throw new ErroTicket(
                     'Este canal não está ' +
                     'vinculado a um ticket.'
                 );
             }
-
             if (
                 !podeAtender(
                     interaction,
@@ -2433,7 +1585,6 @@ async function handleTicketInteraction(
                     'pode utilizar este botão.'
                 );
             }
-
             if (
                 ![
                     'aberto',
@@ -2446,11 +1597,6 @@ async function handleTicketInteraction(
                     'Este ticket não está mais aberto.'
                 );
             }
-
-            // ==================================
-            // ASSUMIR
-            // ==================================
-
             if (
                 id === 'ticket_assumir'
             ) {
@@ -2458,19 +1604,12 @@ async function handleTicketInteraction(
                     flags:
                         MessageFlags.Ephemeral
                 });
-
                 await executarAssumir(
                     interaction,
                     ticket
                 );
-
                 return true;
             }
-
-            // ==================================
-            // CANCELAR
-            // ==================================
-
             if (
                 id === 'ticket_cancelar'
             ) {
@@ -2478,31 +1617,18 @@ async function handleTicketInteraction(
                     flags:
                         MessageFlags.Ephemeral
                 });
-
                 await executarCancelar(
                     interaction,
                     ticket
                 );
-
                 return true;
             }
-
-            // ==================================
-            // FINALIZAR
-            // ==================================
-
             await abrirModalFinalizacao(
                 interaction,
                 ticket
             );
-
             return true;
         }
-
-        // ==================================
-        // MODAL DE FINALIZAÇÃO
-        // ==================================
-
         if (
             interaction.isModalSubmit() &&
             id.startsWith(
@@ -2515,7 +1641,6 @@ async function handleTicketInteraction(
                         'ticket_concluir_'.length
                     )
                 );
-
             if (
                 !Number.isSafeInteger(ticketId) ||
                 ticketId <= 0
@@ -2524,27 +1649,18 @@ async function handleTicketInteraction(
                     'Número do ticket inválido.'
                 );
             }
-
             await concluirPedido(
                 interaction,
                 ticketId
             );
-
             return true;
         }
-
-        // ==================================
-        // ID NÃO RECONHECIDO
-        // ==================================
-
         return false;
-
     } catch (erro) {
         console.error(
             '[InovareSale | Ticket] Erro:',
             erro
         );
-
         const mensagem =
             erro instanceof ErroTicket
                 ? `❌ ${erro.message}`
@@ -2553,13 +1669,11 @@ async function handleTicketInteraction(
                     'esta ação. Avise a equipe ' +
                     'se o problema continuar.'
                 );
-
         try {
             await responder(
                 interaction,
                 mensagem
             );
-
         } catch (erroResposta) {
             console.error(
                 '[InovareSale | Ticket] ' +
@@ -2567,22 +1681,11 @@ async function handleTicketInteraction(
                 erroResposta
             );
         }
-
         return true;
     }
 }
-
-// ==========================================
-// EXPORTAÇÕES
-// ==========================================
-
-// Mantemos os nomes utilizados
-// pelo projeto anterior.
-
 module.exports = {
     handleTicketInteraction,
-
     interpretarQuantidade,
-
     calcularPedido
 };
